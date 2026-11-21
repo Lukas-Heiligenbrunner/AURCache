@@ -157,7 +157,8 @@ attempt; rebuilding one publishes it again, signed:
 
 It is kept as `signing-key.asc` in the CA directory (`AURCACHE_CA_DIR`,
 `./data/ca` by default), readable by the server's user only. Back it up with
-the CA: losing it means a new key, which every client has to trust again.
+the CA — a [dump with secrets](../cli/maintenance.md) does both: losing it
+means a new key, which every client has to trust again.
 
 :::warning Keep the key out of the repository directory
 A container whose only volume is the repository, as a 0.5 compose file has
@@ -211,9 +212,25 @@ elsewhere with `AURCACHE_SIGNING_KEY_FILE`.
   from whoever does not also have the passphrase file. It cannot protect the
   key from someone who can read both, which the server has to do to sign at
   all.
-- A [dump](../cli/maintenance.md), even one taken with secrets, never carries the
-  key: a client that trusts it installs whatever it signs, from wherever, long
-  after the instance a dump came from is gone. Copy the file on purpose.
+- A [dump taken with secrets](../cli/maintenance.md) carries the key the server
+  signs with, as stored, so that an instance reinstalled or moved from it signs
+  with the key its clients already trust. Keep such a dump as safely as the key
+  itself: whoever holds it can sign packages every trusting client installs as
+  root. A key locked with a passphrase stays locked in the dump, and the
+  passphrase is never in it; restoring then needs the same passphrase
+  configured. A dump without secrets carries nothing about signing. A key a
+  restore replaces is kept beside it as
+  `signing-key.asc.replaced-<fingerprint>`.
+- **Without [sign-in](./authentication.md), anyone who can reach the API can
+  take the key.** An instance with no OAuth configured treats every caller as
+  signed in, so anyone who can reach it can download a dump with secrets —
+  the signing key in it unlocked unless it is locked with a passphrase — or
+  restore one with a key of their own. Configure sign-in before turning
+  signing on, or keep the API unreachable from anyone you would not give the
+  key to: `AURCACHE_HTTP_LISTEN_ADDRESS=127.0.0.1` or a private network, or a
+  proxy that authenticates in front of it. The repository's own listener
+  (`AURCACHE_REPO_LISTEN_ADDRESS`) serves only the packages, the databases and
+  their signatures, and can stay public.
 - The public key is served without authentication at `GET /api/repo/key`.
   Publishing it on a keyserver is your call, and cannot be undone:
   `curl -fsSL …/api/repo/key | gpg --import` then
@@ -226,7 +243,10 @@ whatever is signed by a key it has not imported. So replace a key in this
 order: first import and trust the new key on every client (`pacman-key --add`
 and `--lsign-key`, as above, with the new key's file and fingerprint), then
 restart the server with it. A new subkey under the same primary key needs the
-same import, though the primary key's trust carries over.
+same import, though the primary key's trust carries over. Restoring a dump with
+secrets puts its key in place at once, without a restart: the same order
+applies. There is no command yet to replace a key that has leaked, with a dump
+or otherwise.
 
 Turning signing off removes the databases' signatures at the next start, since
 the databases are written unsigned from then on. A package already published

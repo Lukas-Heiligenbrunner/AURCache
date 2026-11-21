@@ -10,7 +10,7 @@ use std::io::Write;
 use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
     DumpSecrets, DumpSettings, DumpToken, DumpWorker, MANIFEST_FILE, PACKAGES_FILE, PATCH_DIR,
-    SETTINGS_FILE, TOKENS_FILE, WORKERS_FILE,
+    SETTINGS_FILE, SIGNING_KEY_FILE, TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_db::api_tokens;
@@ -20,6 +20,7 @@ use aurcache_db::{packages, settings, workers};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use tracing::warn;
 
 /// Everything a dump carries, before it is packed into an archive.
 ///
@@ -36,15 +37,24 @@ pub struct Dump {
     pub secrets: Option<DumpSecrets>,
 }
 
+/// Where a dump with secrets reads them from.
+#[derive(Clone, Copy)]
+pub struct SecretSources<'a> {
+    /// The worker CA's directory, where the server also keeps its own signing
+    /// key.
+    pub ca_dir: &'a std::path::Path,
+}
+
 /// Read the authored state out of the database.
 ///
-/// `ca_dir` opts the dump into carrying secrets: the CA, the certificates the
-/// workers hold, and the API token hashes. `None` -- the default everywhere --
-/// produces a dump that is safe to keep beside ordinary backups.
+/// `secrets` opts the dump into carrying them: the CA, the certificates the
+/// workers hold, the API token hashes and the repository's signing key.
+/// `None` -- the default everywhere -- produces a dump that is safe to keep
+/// beside ordinary backups, and says nothing about signing at all.
 pub async fn build_dump(
     db: &DatabaseConnection,
     aurcache_version: &str,
-    ca_dir: Option<&std::path::Path>,
+    secrets: Option<SecretSources<'_>>,
 ) -> anyhow::Result<Dump> {
     // Ordered by name so two dumps of the same instance are byte-identical and
     // a dump kept in git shows only real changes.
@@ -77,8 +87,8 @@ pub async fn build_dump(
     }
 
     let settings = build_settings(db, &pkgbase_of_id).await?;
-    let secrets = match ca_dir {
-        Some(dir) => Some(build_secrets(db, dir).await?),
+    let secrets = match secrets {
+        Some(sources) => Some(build_secrets(db, sources).await?),
         None => None,
     };
     let workers = build_workers(db, secrets.is_some()).await?;
@@ -101,17 +111,41 @@ pub async fn build_dump(
     })
 }
 
-/// Read the CA and the token hashes.
+/// The secrets a dump reads from files.
+struct SecretFiles {
+    ca: aurcache_ca::Ca,
+    /// As [`DumpSecrets::signing_key`].
+    signing_key: Option<String>,
+}
+
+/// Read the CA, the token hashes and the signing key.
 ///
 /// The CA is read from its files rather than from a loaded `Ca`, deliberately:
 /// there is no method anywhere that hands out the private key of a CA already
 /// in memory, and this does not add one. Export moves files; so does restore.
+/// The signing key likewise: the file the server signs with, or would once
+/// `AURCACHE_SIGN` is on, read as it is stored.
 async fn build_secrets(
     db: &DatabaseConnection,
-    ca_dir: &std::path::Path,
+    sources: SecretSources<'_>,
 ) -> anyhow::Result<DumpSecrets> {
-    let ca_dir = ca_dir.to_path_buf();
-    let ca = tokio::task::spawn_blocking(move || aurcache_ca::Ca::load(&ca_dir)).await??;
+    let ca_dir = sources.ca_dir.to_path_buf();
+    let SecretFiles { ca, signing_key } = tokio::task::spawn_blocking(move || {
+        let ca = aurcache_ca::Ca::load(&ca_dir)?;
+        let location = aurcache_signing::KeyLocation::from_env(&ca_dir);
+        let signing_key = aurcache_signing::dump_text(location.path())?;
+        anyhow::Ok(SecretFiles { ca, signing_key })
+    })
+    .await??;
+    if let Some(text) = &signing_key
+        && !aurcache_signing::inspect(text.as_bytes())?.locked
+    {
+        warn!(
+            "the dump carries the repository signing key unlocked: whoever holds it can sign \
+             packages clients install; a passphrase (AURCACHE_SIGNING_KEY_PASSPHRASE_FILE) \
+             keeps it locked in the dump"
+        );
+    }
     let ca_cert_pem = ca.ca_cert_pem().to_owned();
     let ca_key_pem = ca.private_key_pem().to_owned();
 
@@ -130,6 +164,7 @@ async fn build_secrets(
         ca_cert_pem,
         ca_key_pem,
         tokens,
+        signing_key,
     })
 }
 
@@ -226,8 +261,11 @@ pub fn write_archive(dump: &Dump) -> anyhow::Result<Vec<u8>> {
         }
         if let Some(secrets) = &dump.secrets {
             append(&mut tar, CA_CERT_FILE, &secrets.ca_cert_pem)?;
-            append(&mut tar, CA_KEY_FILE, &secrets.ca_key_pem)?;
-            append(&mut tar, TOKENS_FILE, &to_json(&secrets.tokens)?)?;
+            append_private(&mut tar, CA_KEY_FILE, &secrets.ca_key_pem)?;
+            append_private(&mut tar, TOKENS_FILE, &to_json(&secrets.tokens)?)?;
+            if let Some(key) = &secrets.signing_key {
+                append_private(&mut tar, SIGNING_KEY_FILE, key)?;
+            }
         }
         // Finish explicitly: dropping the encoder would swallow a compression
         // error.
@@ -243,10 +281,28 @@ fn to_json<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
 }
 
 fn append<W: Write>(tar: &mut tar::Builder<W>, path: &str, content: &str) -> anyhow::Result<()> {
+    append_mode(tar, path, content, 0o644)
+}
+
+/// A private key, which `tar -x` should not leave readable by everyone.
+fn append_private<W: Write>(
+    tar: &mut tar::Builder<W>,
+    path: &str,
+    content: &str,
+) -> anyhow::Result<()> {
+    append_mode(tar, path, content, 0o600)
+}
+
+fn append_mode<W: Write>(
+    tar: &mut tar::Builder<W>,
+    path: &str,
+    content: &str,
+    mode: u32,
+) -> anyhow::Result<()> {
     let mut header = tar::Header::new_gnu();
     header.set_path(path)?;
     header.set_size(content.len() as u64);
-    header.set_mode(0o644);
+    header.set_mode(mode);
     header.set_cksum();
     tar.append(&header, content.as_bytes())?;
     Ok(())

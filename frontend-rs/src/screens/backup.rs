@@ -7,7 +7,8 @@
 use crate::screens::settings::Section;
 use crate::widgets::Modal;
 use aurcache_client::{
-    ExistingPackagePolicy, RestoreEntry, RestoreOptions, RestoreOutcome, SecretsPolicy,
+    ExistingPackagePolicy, RestoreEntry, RestoreOptions, RestoreOutcome, SecretChange,
+    SecretReport, SecretsPolicy,
 };
 use dioxus::html::{FileData, HasFileData};
 use dioxus::prelude::*;
@@ -83,9 +84,10 @@ fn DumpDialog(open: Signal<bool>) -> Element {
                     div {
                         div { class: "text-sm", "Include secrets" }
                         div { class: "text-xs opacity-60",
-                            "The CA private key, the certificates your workers hold, and \
-                             API token hashes. Restoring these makes a move invisible to \
-                             your workers: they reconnect instead of re-enrolling."
+                            "The CA private key, the certificates your workers hold, API \
+                             token hashes and the repository signing key. Restoring these \
+                             makes a move invisible to your workers and to pacman: they \
+                             reconnect instead of re-enrolling, and keep trusting the key."
                         }
                     }
                 }
@@ -98,8 +100,10 @@ fn DumpDialog(open: Signal<bool>) -> Element {
                             div { class: "font-semibold", "This file is a credential." }
                             div { class: "text-xs",
                                 "Anyone holding it can act as a build worker for this \
-                                 server, for as long as this CA lives. Keep it as you \
-                                 would keep a private key."
+                                 server, for as long as this CA lives, and -- unless the \
+                                 signing key is locked with a passphrase -- sign packages \
+                                 its clients install. Keep it as you would keep the \
+                                 signing key."
                             }
                         }
                     }
@@ -140,6 +144,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
     let mut preview = use_signal(Vec::<RestoreEntry>::new);
+    let mut secret_preview = use_signal(Vec::<SecretReport>::new);
     // Where a started restore goes once the dialog closes.
     let jobs = crate::progress::use_jobs();
 
@@ -147,6 +152,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
         file_name.set(String::new());
         bytes.set(bytes::Bytes::new());
         preview.set(Vec::new());
+        secret_preview.set(Vec::new());
         error.set(None);
         hovering.set(false);
         busy.set(false);
@@ -181,6 +187,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
                 // previewed; showing the old result against the new name would
                 // be worse than showing nothing.
                 preview.set(Vec::new());
+                secret_preview.set(Vec::new());
                 error.set(None);
                 file_name.set(name);
                 bytes.set(content);
@@ -218,6 +225,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
             Ok(accepted) => {
                 if dry_run {
                     preview.set(accepted.preview);
+                    secret_preview.set(accepted.secrets);
                 } else if let Some(job_id) = accepted.job_id {
                     // Handed to the progress card and the dialog closes, rather
                     // than holding the page until every package is imported. A
@@ -302,8 +310,8 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
                 if let Some(message) = error() {
                     div { class: "alert alert-error text-sm", span { "{message}" } }
                 }
-                if !preview().is_empty() {
-                    RestoreReport { entries: preview(), blocked: blocked() }
+                if !preview().is_empty() || !secret_preview().is_empty() {
+                    RestoreReport { entries: preview(), secrets: secret_preview(), blocked: blocked() }
                 }
             }
             div { class: "modal-action",
@@ -368,7 +376,10 @@ fn RestoreOptionsForm(
                     div { class: "text-sm", "Replace everything" }
                     div { class: "text-xs opacity-60",
                         "Remove every package, setting and worker here first, so this \
-                         instance ends up as the dump describes and nothing else."
+                         instance ends up as the dump describes and nothing else. A \
+                         signing key in the dump replaces this server's, which is kept \
+                         beside it, named for its fingerprint; without one, the key is \
+                         left as it is."
                     }
                 }
             }
@@ -386,7 +397,10 @@ fn RestoreOptionsForm(
                     div { class: "text-xs opacity-60",
                         "Replaces this server's CA with the dump's. Every certificate your \
                          current workers hold was signed by the old one and stops working; \
-                         they re-enrol. Ignored if the dump carries no secrets."
+                         they re-enrol. The dump's signing key replaces this server's own, \
+                         which is kept beside it, and clients trusting the old one have to \
+                         trust it instead. Ignored \
+                         if the dump carries no secrets."
                     }
                 }
             }
@@ -394,9 +408,10 @@ fn RestoreOptionsForm(
     }
 }
 
-/// What an import did, or would do.
+/// What an import would do, to each package and to each of the server's
+/// secrets.
 #[component]
-fn RestoreReport(entries: Vec<RestoreEntry>, blocked: bool) -> Element {
+fn RestoreReport(entries: Vec<RestoreEntry>, secrets: Vec<SecretReport>, blocked: bool) -> Element {
     rsx! {
         div {
             if blocked {
@@ -423,6 +438,19 @@ fn RestoreReport(entries: Vec<RestoreEntry>, blocked: bool) -> Element {
                         }
                     }
                 }
+                for report in secrets {
+                    li { key: "secret-{report.secret.label()}",
+                        div { class: "flex flex-col items-start gap-0.5",
+                            div { class: "flex items-baseline gap-2",
+                                span { class: "badge badge-xs {change_class(report.change)}",
+                                    {report.change.label()}
+                                }
+                                span { class: "text-sm font-semibold", "{report.secret.label()}" }
+                            }
+                            span { class: "text-xs opacity-70 text-left", "{report.detail}" }
+                        }
+                    }
+                }
             }
         }
     }
@@ -434,5 +462,14 @@ fn outcome_class(outcome: &RestoreOutcome) -> &'static str {
         RestoreOutcome::Overwritten => "badge-warning",
         RestoreOutcome::Skipped => "badge-ghost",
         RestoreOutcome::Failed { .. } => "badge-error",
+    }
+}
+
+fn change_class(change: SecretChange) -> &'static str {
+    match change {
+        SecretChange::Kept => "badge-ghost",
+        SecretChange::Restored => "badge-success",
+        // Each changes what workers or clients have to trust.
+        SecretChange::Replaced => "badge-warning",
     }
 }

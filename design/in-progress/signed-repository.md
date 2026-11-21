@@ -1,7 +1,8 @@
 # Signed packages and a signed repository
 
 Status: **In progress** (server-side signing of packages and databases, the
-backfill and key publication done; the CLI's and web UI's trust flow, rotation,
+backfill, key publication and the key in dumps with secrets done; the CLI's
+and web UI's trust flow, rotation,
 workers verifying, a keyring package and a staged rollout open — see [What is
 left](#what-is-left)) · Last updated: 2026-11-20
 
@@ -32,6 +33,10 @@ fits into `Repository`.
   unsigned, or under another key, signed through `Update::resign`, and
   databases no update has signed since, through `Update::rewrite_databases`.
 - `GET /api/repo/key` and `GET /api/repo/signing` (no authentication).
+- Dumps with secrets carry the key as stored; restoring one is planned and
+  checked before the restore is accepted, then puts the key in place and
+  swaps it in under the repository lock; a dump without a key leaves it as
+  it is, `--clear` included ([Backups](#backups)).
 - Docs: `docs/docs/Configuration/pacman-repo.md#signing-the-repository`, three
   rows in the environment page.
 - `scripts/test-signed-repo.sh`: pacman itself, in a container, against a
@@ -298,19 +303,88 @@ key is test-unlocked at start — sign and verify an empty message — so a wron
 passphrase fails there, not at the first publish. The docs say what it does
 and does not protect against.
 
-The secret key never leaves the crate: there is no accessor for it,
+A loaded key never hands its secret out: there is no accessor for it,
 `InstanceKey`'s `Debug` shows the fingerprint only, and only the armored
-public key is served.
+public key is served. The one way the secret leaves the server is the key
+file, as stored, in a dump taken with secrets ([Backups](#backups)).
 
 ### Backups
 
-**Decided: the key is never in a dump**, with secrets or without
-(`DumpSecrets`' doc, a test in `aurcache-utils/tests/dump.rs`). A dump with
-secrets already carries the worker CA, but the signing key is worse to leak:
-every client that trusts it installs, as root, whatever it signs, from
-anywhere, for as long as it is trusted — long after the instance a dump came
-from is gone. It moves as the file it is, copied on purpose; the docs tell
-operators to back it up with the CA directory.
+**Decided: a dump with secrets carries the key; one without says nothing about
+signing.** Dumps exist to reinstall an instance after a problem and to move
+one to a new server, and pacman refuses a signature from a key it does not
+trust even under `SigLevel = Optional`. A dump without the key would force a
+new key on every restore and break every client until it trusts that one —
+the opposite of what a dump is for. Dumps with secrets already carry the
+worker CA for the same reason.
+
+- **Without secrets**: no key, no fingerprint, nothing checked on restore.
+- **With secrets** (`DumpSecrets::signing_key`, `signing-key.asc` in the
+  archive): the key the server signs with, its own or one supplied with
+  `AURCACHE_SIGNING_KEY_FILE`, read from its file exactly as stored
+  (`aurcache_signing::dump_text`) — never from the loaded key, like the CA. A
+  binary file is armored around the same bytes. A key locked with
+  `AURCACHE_SIGNING_KEY_PASSPHRASE_FILE` stays locked, and the passphrase is
+  never in the dump; exporting an unlocked key logs a warning. The secret
+  files in the archive are mode 0600.
+
+**Restore** is planned before it is accepted (`restore::plan_secrets`, in
+the route, on a blocking thread): a plan that cannot be carried out answers
+`400`, `nothing was imported: …` (`would be` for a dry run), with nothing
+written. The plan stages the CA (`Ca::stage`), the key (`fs::stage_private`)
+and a copy of what the server's own key file holds (`fs::stage_replaced`)
+beside what they replace; dropped, it removes them, and the server sweeps
+what a stopped restore left at start (`fs::remove_staged`). Once the rows
+have committed (`CommitOutcome::Committed`), `apply_secrets` only renames: a
+rename that fails is a failed entry, that secret as it was; one whose
+directory could not be synced is in place, and the activity log says so
+(`restore.secret_unsynced`). A COMMIT whose outcome is unknown applies no
+secret. One restore runs at a time.
+
+**What a restore says it does**: one line per secret it touches
+(`RestoreAccepted::secrets`, `SecretReport { secret, change, detail }`,
+`kept`, `restored` or `replaced`), apart from the packages, so that a
+released client reads the answer as before. **Finding:** a new
+`RestoreOutcome` variant broke the 0.6.0 CLI on every restore — the enum is
+internally tagged, with no catch-all — so a test decodes the answers with
+0.6.0's types. The activity log records the signing key's line as it is
+(`restore.signing_key_changed`), from the same function (`key_report`).
+
+What is checked is what is written, as it will be used: a key to sign with
+has to unlock with this server's passphrase and sign now; a key only kept
+(the server signs with a supplied key, or not at all) has to unlock with
+the passphrase if there is one; a key not written is not checked, and the
+passphrase file is read only when one is. A key that comes unlocked onto a
+server with a passphrase is written locked (`aurcache_signing::locked`).
+
+- **Refused whole**: a CA that is not a pair, a key this server cannot
+  unlock, a CA directory it cannot write, a file a rename cannot replace
+  (`fs::check_replaceable`: not a regular file, or mounted in place, told by
+  `/proc/self/mountinfo` — comparing devices refused a file in an overlay).
+- **`--secrets copy`**, or **`--clear`** with a key in the dump, puts the
+  dump's key in the server's own file and `Repository::replace_key` swaps it
+  in. **Without a key in the dump the key is kept**, `--clear` included, as
+  the CA is: a restore never generates or removes a key.
+- **A supplied key** (`AURCACHE_SIGNING_KEY_FILE`) is never written, even
+  when it is the server's own file (`fs::same_file`, by device and inode);
+  that a dump's key is not written there is a line in the log.
+- **The replaced key is kept**, owner-only, as
+  `signing-key.asc.replaced-<fingerprint>`, or `-sha256-<16 hex>` for a file
+  that is not a key, unless the file held the very bytes written: the same
+  key can hold more than a copy written over it. The copy goes under `.2`,
+  `.3` when the name is taken, and is never written over anything, at
+  install either (a hard link). What is at a name is opened without
+  following a link and judged by what was opened: only a regular file of
+  this user's, writable by it alone, is taken for the copy, and one others
+  can read is refused (`fs::Readers::Owner`; a `known_hosts` copy may be
+  read by all, `Readers::Everyone`). The CA a restore replaces is not kept.
+
+**What it costs.** A dump with secrets is as sensitive as the key itself:
+whoever holds it can sign packages and databases that every trusting client
+installs as root, until the key is replaced and every client trusts the new
+one. Kept apart from its passphrase, a dump with a locked key signs nothing.
+The docs say this where dumps are taken, and that an instance without
+sign-in gives this to anyone who can reach its API.
 
 ### Turning it on
 
@@ -553,9 +627,8 @@ subkey. During that backfill `repo.db` lists a mix of old and new signatures
 
 ### Replacing the key while the server runs
 
-**Built** as the step a restore of a dump with secrets needs, with no caller
-of its own yet: `Repository::replace_key` swaps in another key without a
-restart. It is not rotation -- the key is still one signing subkey, replaced
+**Built** for a restore of a dump with secrets ([Backups](#backups)), its one
+caller: `Repository::replace_key` swaps in another key without a restart. It is not rotation -- the key is still one signing subkey, replaced
 whole -- and the same rule holds: clients have to trust the new key first.
 
 - It holds the repository lock, so no update is between reading the key --
@@ -631,6 +704,21 @@ Built:
   key that could not be persisted not swapped in; a key replaced while an
   update holds the lock waits for it, and the backfill re-signs what it
   published; a run the replacement made fail restarts quietly.
+- Dumps and restores (`aurcache-utils/tests/dump.rs`, `aurcache-common`,
+  `aurcache-api/tests/restore.rs`): a dump with secrets carries the key as
+  stored, locked and without its passphrase, its secret files mode 0600; one
+  without secrets carries nothing about signing; a restore replaces a
+  generated key, signs with it at once, and the backfill re-signs; `--clear`
+  without a key leaves the key untouched, and with one installs it; a locked key without its passphrase, a CA
+  that is not a pair and a read-only CA directory are refused before
+  anything changes, the route answering `400`; a supplied key keeps signing
+  and is never written, even at the server's own location; the key a
+  restore replaces is kept under its fingerprint; the same dump restored
+  twice replaces nothing, and one locked anew keeps a copy; a 0.6.0 client
+  decodes every answer; a kept copy never overwrites another, at install
+  either, follows a link, or is taken from a file others can read or write,
+  and a tag naming another directory is refused; a file mounted in
+  place is refused and one in an overlay is not, under `unshare -rm`.
 - `scripts/test-signed-repo.sh`, with its fixture
   `aurcache-utils/tests/signed_repository.rs` (ignored by `cargo test`).
 

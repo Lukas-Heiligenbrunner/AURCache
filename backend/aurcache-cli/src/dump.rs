@@ -4,7 +4,7 @@ use crate::cli::{OutputFormat, RestoreArgs};
 use crate::output::{follow_job, render};
 use anyhow::{Context, Result, bail};
 use aurcache_client::{
-    AurCacheClient, RestoreEntry, RestoreOptions, RestoreOutcome, RestoreProgress,
+    AurCacheClient, RestoreEntry, RestoreOptions, RestoreOutcome, RestoreProgress, SecretReport,
 };
 use serde::Serialize;
 use std::io::Write;
@@ -36,6 +36,10 @@ pub(crate) async fn restore_command(
             }
             println!("would apply {} package(s):", accepted.total);
             accepted.preview.iter().for_each(print_restore_entry);
+            if !accepted.secrets.is_empty() {
+                println!("and to this server's secrets:");
+                accepted.secrets.iter().for_each(print_secret_report);
+            }
         })?;
         // A dry run that found something blocking exits non-zero, so
         // `restore --dry-run && restore` cannot walk into the failure it was
@@ -51,6 +55,10 @@ pub(crate) async fn restore_command(
 
     if format == OutputFormat::Text {
         println!("restoring {} package(s), job {job_id}", accepted.total);
+        if !accepted.secrets.is_empty() {
+            println!("and this server's secrets, once the packages are in:");
+            accepted.secrets.iter().for_each(print_secret_report);
+        }
     }
     let run: RestoreProgress = follow_job(
         format,
@@ -67,12 +75,20 @@ pub(crate) async fn restore_command(
     restore_result(run.failed)
 }
 
-/// One package of a restore, or of the preview of one.
+/// One package of a restore, or of the preview of one -- or, its name
+/// empty, the dump as a whole.
 pub(crate) fn print_restore_entry(entry: &RestoreEntry) {
     println!("  {:<10} {}", entry.outcome.label(), entry.pkgbase);
     if let RestoreOutcome::Failed { error } = &entry.outcome {
         println!("             {error}");
     }
+}
+
+/// What a restore does to one of the server's secrets, should every rename
+/// succeed: a failure after the packages are in is a failed entry of its own.
+fn print_secret_report(report: &SecretReport) {
+    println!("  {:<10} {}", report.change.label(), report.secret.label());
+    println!("             {}", report.detail);
 }
 
 /// A restore with failures exits non-zero, so a partly-applied dump is not
@@ -126,8 +142,10 @@ pub(crate) async fn dump_command(
         println!("wrote {} ({} bytes)", written.path.display(), written.bytes);
         if include_secrets {
             println!(
-                "This file contains the CA private key. Anyone holding it can \
-                 act as a build worker for this server."
+                "This file contains the CA private key and the repository signing key. \
+                 Anyone holding it can act as a build worker for this server, and, \
+                 unless the signing key is locked with a passphrase, sign packages \
+                 its clients install. Keep it as you keep the signing key."
             );
         }
     })

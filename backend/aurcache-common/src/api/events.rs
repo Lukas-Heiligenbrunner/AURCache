@@ -36,6 +36,7 @@
 //! See `design/implemented/structured-logs.md`.
 
 use crate::api::activity::Severity;
+use crate::api::dump::SecretChange;
 use crate::api::log::{BuildRef, EntityRef, PackageRef, WorkerRef};
 use serde::{Deserialize, Serialize};
 
@@ -503,6 +504,24 @@ events! {
     /// hold is now worthless, and each has to enroll again.
     RestoreCaReplaced => ("restore.ca_replaced", "Backups", "Worker CA replaced") {},
 
+    /// A restore put the dump's repository signing key in the server's own
+    /// key file: `change` says whether it restored one where there was none
+    /// or replaced one, and `detail` says the rest, as the restore's own
+    /// report line does -- which key signs now, what clients have to trust,
+    /// and where the key it replaced is kept.
+    RestoreSigningKeyChanged => ("restore.signing_key_changed", "Backups", "Signing key restored") {
+        change: SecretChange,
+        detail: String,
+    },
+
+    /// A restore put a secret's file in place, but its directory could not be
+    /// synced after: every reader sees the new file, but a crash soon after
+    /// may bring the old one back.
+    RestoreSecretUnsynced => ("restore.secret_unsynced", "Backups", "Restored secret not synced") {
+        file: String,
+        error: String,
+    },
+
     // -----------------------------------------------------------------------
     // Mirrors and the repository
     // -----------------------------------------------------------------------
@@ -790,6 +809,8 @@ impl Event {
             | Self::SignInRefused { .. }
             | Self::RestorePackageFailed { .. }
             | Self::RestoreCaReplaced {}
+            | Self::RestoreSigningKeyChanged { .. }
+            | Self::RestoreSecretUnsynced { .. }
             | Self::WorkersUntrusted { .. }
             | Self::MirrorRankFailed { .. }
             | Self::OfficialReposRefreshFailed { .. }
@@ -1222,6 +1243,14 @@ impl Event {
             Self::RestoreCaReplaced {} => vec![text(
                 "a restore replaced the worker CA; every worker has to enroll again",
             )],
+            Self::RestoreSigningKeyChanged { change, detail } => vec![text(format!(
+                "a restore {} the repository signing key: {detail}",
+                change.label()
+            ))],
+            Self::RestoreSecretUnsynced { file, error } => vec![text(format!(
+                "a restore put {file} in place, but its directory could not be synced \
+                 ({error}): a crash soon after may undo it"
+            ))],
             Self::MirrorRankFailed { error } => {
                 vec![text(format!("could not rank the mirrors: {error}"))]
             }
@@ -1509,6 +1538,16 @@ mod tests {
                 error: error(),
             },
             Event::RestoreCaReplaced {},
+            Event::RestoreSigningKeyChanged {
+                change: SecretChange::Replaced,
+                detail: "the dump's key 0B05DA40BC50A034F03B4975B4624944991A5056 in \
+                         data/ca/signing-key.asc"
+                    .to_string(),
+            },
+            Event::RestoreSecretUnsynced {
+                file: "data/ca/signing-key.asc".to_string(),
+                error: error(),
+            },
             Event::WorkersUntrusted {
                 workers: vec!["builder-01".to_string()],
             },

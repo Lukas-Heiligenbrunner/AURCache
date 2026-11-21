@@ -22,15 +22,18 @@
 //! either -- an imported graph could disagree with today's AUR -- so the depends
 //! lists have to be rediscovered from the sources regardless.
 
+use anyhow::Context;
 use aurcache_db::lists::{BuildFlags, Platforms, WorkerList};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
     DumpSecrets, DumpSettings, DumpToken, DumpWorker, ExistingPackagePolicy, MANIFEST_FILE,
     PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome, SETTINGS_FILE,
-    SecretsPolicy, TOKENS_FILE, WORKERS_FILE,
+    SIGNING_KEY_FILE, Secret, SecretChange, SecretReport, SecretsPolicy, TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
@@ -42,13 +45,20 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Qu
 use tokio::sync::mpsc::Sender;
 
 use crate::package::source_facts::{SourceFacts, pkg_deps, record_source_names};
-use crate::repository::Repository;
+use crate::repository::{CommitOutcome, FinalizationPending, KeyReplacement, KeySwap, Repository};
 use crate::services::Services;
 use crate::settings::Change;
 use crate::snapshot::SnapshotStore;
+use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::{Event, RestoreStep};
+use aurcache_ca::StagedCa;
+use aurcache_common::fs::{
+    Installed, KeptCopy, Readers, Staged, check_replaceable, same_file, stage_private,
+};
+use aurcache_signing::{InstanceKey, KeyLocation};
 
-/// A dump that has been read and checked, ready to apply.
+/// A dump that has been read and checked, ready to apply. Its `Debug` prints
+/// no secret, since that of [`DumpSecrets`] says only what it holds.
 #[derive(Clone, Debug)]
 pub struct LoadedDump {
     pub manifest: DumpManifest,
@@ -183,8 +193,10 @@ fn load_secrets(
                      verify them; it was assembled wrongly"
                 );
             }
-            if files.contains_key(TOKENS_FILE) {
-                anyhow::bail!("this dump carries {TOKENS_FILE} but no CA; secrets travel together");
+            for alone in [TOKENS_FILE, SIGNING_KEY_FILE] {
+                if files.contains_key(alone) {
+                    anyhow::bail!("this dump carries {alone} but no CA; secrets travel together");
+                }
             }
             return Ok(None);
         }
@@ -198,10 +210,19 @@ fn load_secrets(
         None => Vec::new(),
     };
 
+    // Read, not unlocked: whether this server can unlock it is a question for
+    // the restore that would install it, not for reading the dump.
+    let signing_key = files.get(SIGNING_KEY_FILE).cloned();
+    if let Some(key) = &signing_key {
+        aurcache_signing::inspect(key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("{SIGNING_KEY_FILE} is not a signing key: {e:#}"))?;
+    }
+
     Ok(Some(DumpSecrets {
         ca_cert_pem,
         ca_key_pem,
         tokens,
+        signing_key,
     }))
 }
 
@@ -215,11 +236,12 @@ fn parse<T: serde::de::DeserializeOwned>(
     serde_json::from_str(content).map_err(|e| anyhow::anyhow!("{name} is not valid: {e}"))
 }
 
-/// What a dump would do to one package, without doing it.
+/// What a dump would do to each package, without doing it.
 ///
 /// A dry run answers the only question worth asking before an import: which of
-/// my packages does this touch. It reads, so it can be wrong about a race, but
-/// nothing it reports has happened.
+/// my packages does this touch. What it would do to the server's secrets is
+/// the plan's to say ([`plan_secrets`], [`SecretsPlan::expected`]). It reads,
+/// so it can be wrong about a race, but nothing it reports has happened.
 pub async fn preview(
     db: &DatabaseConnection,
     dump: &LoadedDump,
@@ -317,9 +339,13 @@ async fn package_row(
 /// package names, so a dependency naming one of those will not find it; the
 /// entry says so, because it is the difference between a restore that worked
 /// and one that looks like it did.
+///
+/// `plan` is what [`plan_secrets`] made of the dump's secrets before the
+/// restore was accepted: refusing it is the caller's, since a restore that
+/// could not finish is refused whole, before anything is written.
 pub async fn apply(
     services: &Services,
-    ca_dir: &std::path::Path,
+    plan: SecretsPlan,
     dump: LoadedDump,
     options: RestoreOptions,
     progress: Sender<RestoreEntry>,
@@ -339,25 +365,49 @@ pub async fn apply(
         }
     };
 
-    for entry in &applied.entries {
-        let _ = progress.send(entry.clone()).await;
-    }
-
-    // Written after the rows commit, and only then: replacing the CA on disk is
-    // not something a rolled-back transaction can take back, so it must not
-    // happen while the import might still fail.
-    match write_secrets(&dump, &options, ca_dir) {
-        Ok(true) => services.activity.emit(Event::RestoreCaReplaced {}),
-        Ok(false) => {}
-        Err(e) => {
+    match &applied.commit {
+        RowsCommit::Done => {}
+        RowsCommit::FilesPending { error } => {
+            // The rows committed: the repository's files catch up through the
+            // recorded plan, and the restore goes on.
             report_failure(
                 &progress,
                 "",
-                format!("the packages were imported, but the secrets were not: {e:#}"),
+                format!(
+                    "the packages were imported, but the repository's files are not all in \
+                     place yet ({error}); the next repository update or restart puts them there"
+                ),
             )
             .await;
         }
+        RowsCommit::Unknown { error } => {
+            // Neither "imported" nor "not imported" would be true, and the
+            // secrets go with the rows: put in place over rows that did not
+            // commit, they would leave the instance as neither the dump nor
+            // what it was. The plan is dropped, and nothing changes them.
+            drop(plan);
+            report_failure(
+                &progress,
+                "",
+                format!(
+                    "whether the packages were imported is unknown: the database did not \
+                     confirm the commit ({error}). The worker CA and the signing key were left \
+                     as they are. Check which of the dump's packages are here, then restore it \
+                     again, with --on-existing overwrite if any are"
+                ),
+            )
+            .await;
+            return;
+        }
     }
+    send_all(&progress, applied.entries.clone()).await;
+
+    // Put in place after the rows commit, and only then: replacing the CA on
+    // disk is not something a rolled-back transaction can take back, so it
+    // must not happen while the import might still fail.
+    let secrets = apply_secrets(plan, repo).await;
+    record_secrets(&services.activity, &secrets);
+    send_all(&progress, secret_failures(&secrets)).await;
 
     // PASS 2: sources. Every imported package's `provides` and split package
     // names, so that pass 3 can recognise them. Until this is done for *all* of
@@ -462,46 +512,905 @@ async fn report_failure(progress: &Sender<RestoreEntry>, pkgbase: &str, error: S
         .await;
 }
 
-/// Install the dump's CA and token hashes, when asked to.
-///
-/// Replacing the CA invalidates every certificate the current workers hold, so
-/// it happens only on request. `--clear` counts as that request: it already
-/// says the dump replaces what it carries, and a CA is one of the things it
-/// carries.
-///
-/// The CA is written to disk rather than the database, which is why it cannot
-/// share the transaction that wrote the rows -- and why it is written after
-/// them, once nothing is left that could still roll back.
-///
-/// Returns whether the CA was replaced.
-fn write_secrets(
-    dump: &LoadedDump,
-    options: &RestoreOptions,
-    ca_dir: &std::path::Path,
-) -> anyhow::Result<bool> {
-    let Some(secrets) = &dump.secrets else {
-        return Ok(false);
-    };
-    if !take_secrets(options) {
-        return Ok(false);
+/// Report `entries`, in order; a closed channel is ignored, as by
+/// [`report_failure`].
+async fn send_all(progress: &Sender<RestoreEntry>, entries: Vec<RestoreEntry>) {
+    for entry in entries {
+        let _ = progress.send(entry).await;
+    }
+}
+
+/// What restoring a dump's secrets will do, decided -- and everything it
+/// writes written beside what it replaces -- before the rows are
+/// ([`plan_secrets`]), and put in place once they have committed
+/// ([`apply_secrets`]). Dropped instead, it removes what it wrote, and
+/// nothing in place was touched.
+pub struct SecretsPlan {
+    /// What becomes of the worker CA.
+    ca: CaPlan,
+    /// What becomes of the repository's signing key.
+    signing_key: KeyPlan,
+    /// Where the server keeps its key, which the plan was made for.
+    location: KeyLocation,
+}
+
+/// What a restore does to the worker CA.
+enum CaPlan {
+    /// Leave it as it is: the dump's secrets are not taken.
+    Keep,
+    /// The dump's is the one in place already -- the same certificate -- so
+    /// there is nothing to write: what restoring the same dump again finds.
+    Same,
+    /// The dump's, checked as a pair and staged to replace the one in place.
+    Replace(StagedCa),
+}
+
+/// What a restore does to the repository's signing key. Whatever the
+/// server's own key file held before it is written is kept beside it
+/// ([`Previous`]).
+enum KeyPlan {
+    /// Leave it as it is: the dump's secrets are not taken, the dump carries
+    /// no key -- `--clear` included, which keeps the key as it keeps the CA
+    /// -- or the server's own key file is one it is supplied.
+    Keep,
+    /// Put the dump's key, which the server is to sign with, in its own key
+    /// file, where it is staged: unlocked here, so it can sign, and locked
+    /// with this server's passphrase if it came unlocked.
+    Install {
+        key: Box<InstanceKey>,
+        staged: Staged,
+        previous: Previous,
+    },
+    /// Put the dump's key, `restored`, in the server's own key file without
+    /// signing with it -- the server signs with a key it is supplied, or not
+    /// at all -- for when it does: checked against this server's passphrase,
+    /// if it has one, and locked with it if it came unlocked.
+    Store {
+        restored: String,
+        staged: Staged,
+        previous: Previous,
+    },
+}
+
+/// What the server's own key file holds before a plan writes it: a key
+/// nothing else may have a copy of, so it is kept beside it rather than
+/// lost.
+struct Previous {
+    /// What it will be reported as once kept.
+    expected: PreviousKey,
+    /// A copy staged to be kept as `<file>.replaced-<tag>`
+    /// ([`aurcache_common::fs::stage_replaced`]), when there is anything to
+    /// keep.
+    copy: Option<KeptCopy>,
+}
+
+impl Previous {
+    /// What the server's own key file `own` holds, for a plan that writes
+    /// `written` there, with what it holds staged to be kept: named for its
+    /// key's fingerprint, or for its contents when it does not read as a
+    /// key. Only the very bytes being written are not kept again: the same
+    /// key may hold more than the one written over it -- another subkey, a
+    /// certification -- and a copy already kept with the same bytes is not
+    /// written twice ([`aurcache_common::fs::stage_replaced`]).
+    fn of(own: &Path, written: &[u8]) -> anyhow::Result<Self> {
+        let held = match std::fs::read(own) {
+            Ok(held) => held,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    expected: PreviousKey::Absent,
+                    copy: None,
+                });
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "reading the signing key {} to keep it",
+                    own.display()
+                )));
+            }
+        };
+        if held == written {
+            return Ok(Self {
+                expected: PreviousKey::Same,
+                copy: None,
+            });
+        }
+        let fingerprint = aurcache_signing::inspect(&held)
+            .ok()
+            .map(|facts| facts.fingerprint);
+        let tag = fingerprint
+            .clone()
+            .unwrap_or_else(|| aurcache_common::digest::content_tag(&held));
+        let copy = aurcache_common::fs::stage_replaced(own, &tag, &held, Readers::Owner)
+            .with_context(|| {
+                format!(
+                    "writing a copy of the signing key {} to keep",
+                    own.display()
+                )
+            })?;
+        Ok(Self {
+            expected: PreviousKey::Kept {
+                fingerprint,
+                kept: copy.path().to_path_buf(),
+            },
+            copy: Some(copy),
+        })
     }
 
-    aurcache_ca::Ca::restore(
+    /// Put the copy where it is kept: before the file is replaced.
+    fn keep(self) -> std::io::Result<Installed> {
+        match self.copy {
+            Some(copy) => copy.install(),
+            None => Ok(Installed::Synced),
+        }
+    }
+}
+
+/// Where this server keeps its secrets, and how it uses its signing key:
+/// what a restore's secrets are planned for, read from the environment and
+/// the repository apart so a test can give it.
+pub struct SecretsConfig {
+    /// The worker CA's directory, where the server keeps its own key too.
+    pub ca_dir: PathBuf,
+    pub location: KeyLocation,
+    /// The file holding what unlocks a locked key and locks one a restore
+    /// writes (`AURCACHE_SIGNING_KEY_PASSPHRASE_FILE`). Read only by a plan
+    /// that writes a key, so that a restore that writes none does not
+    /// depend on it.
+    pub passphrase_file: Option<PathBuf>,
+    /// Whether the repository signs: only then, and with its own key, is the
+    /// dump's key one it signs with.
+    pub signs: bool,
+}
+
+impl SecretsConfig {
+    /// As the environment configures it, for a server whose CA directory is
+    /// `ca_dir` and whose repository is `repo`. Nothing is read but the
+    /// environment.
+    #[must_use]
+    pub fn from_env(ca_dir: &Path, repo: &Repository) -> Self {
+        Self {
+            ca_dir: ca_dir.to_path_buf(),
+            location: KeyLocation::from_env(ca_dir),
+            passphrase_file: aurcache_signing::passphrase_file_from_env(),
+            signs: repo.key().is_some(),
+        }
+    }
+}
+
+/// Work out what restoring `dump`'s secrets will do, and refuse it now if
+/// any of it cannot be done: a CA that is not a pair, a key to sign with
+/// that this server cannot unlock or that signs nothing -- it would stop the
+/// server at its next start -- a key to keep that this server's passphrase
+/// does not unlock, or a file it cannot write or replace, such as a CA
+/// directory mounted read-only or a key file mounted in place. What it is to
+/// write is written beside what it replaces, so that a full disk refuses the
+/// restore too -- the copy of the key file it replaces included.
+///
+/// Only what is written is checked, and as it will be used: the dump's key
+/// is unlocked and must sign when the server is to sign with it, is checked
+/// against this server's passphrase when it is only kept, and is not checked
+/// at all when it is not written. A key that comes unlocked onto a server
+/// that locks its keys is locked with its passphrase. The passphrase file is
+/// read only when a key is written.
+///
+/// The secrets are taken with `--secrets copy` or `--clear`. A dump without
+/// a key leaves the key as it is, `--clear` included: a restore never
+/// generates or removes one. A key `AURCACHE_SIGNING_KEY_FILE` supplies is
+/// the operator's, and is never written, even when it is the file where the
+/// server keeps its own.
+///
+/// Unlocking a key is slow by design, so this runs on a blocking thread.
+pub async fn plan_secrets(
+    dump: &LoadedDump,
+    options: &RestoreOptions,
+    config: SecretsConfig,
+) -> anyhow::Result<SecretsPlan> {
+    let secrets = dump.secrets.clone().filter(|_| take_secrets(options));
+    tokio::task::spawn_blocking(move || plan(secrets, config)).await?
+}
+
+fn plan(secrets: Option<DumpSecrets>, config: SecretsConfig) -> anyhow::Result<SecretsPlan> {
+    let SecretsConfig {
         ca_dir,
-        secrets.ca_cert_pem.clone(),
-        secrets.ca_key_pem.clone(),
-    )?;
-    Ok(true)
+        location,
+        passphrase_file,
+        signs,
+    } = config;
+    let own = ca_dir.join(aurcache_signing::KEY_FILE);
+    let own_is_supplied = matches!(&location, KeyLocation::Supplied(path) if same_file(path, &own));
+    // Whether a key in the server's own file is the one it signs with.
+    let own_signs = signs && matches!(location, KeyLocation::Own(_));
+    let ca = match &secrets {
+        None => CaPlan::Keep,
+        Some(secrets) if aurcache_ca::Ca::holds(&ca_dir, &secrets.ca_cert_pem) => CaPlan::Same,
+        Some(secrets) => CaPlan::Replace(
+            aurcache_ca::Ca::stage(
+                &ca_dir,
+                secrets.ca_cert_pem.clone(),
+                secrets.ca_key_pem.clone(),
+            )
+            .context("the dump's CA cannot be put in place")?,
+        ),
+    };
+    // Read only for a key that is written: a restore that writes none goes
+    // through whatever has become of the file.
+    let passphrase = || {
+        passphrase_file
+            .as_deref()
+            .map(aurcache_signing::read_passphrase)
+            .transpose()
+    };
+    let carried = secrets
+        .as_ref()
+        .and_then(|secrets| secrets.signing_key.as_deref());
+    let signing_key = match carried {
+        Some(text) if own_is_supplied => {
+            tracing::info!(
+                "A restore does not write the dump's signing key {}: the server's own key \
+                 file {} is the one AURCACHE_SIGNING_KEY_FILE supplies, which a restore \
+                 never writes",
+                fingerprint(text)?,
+                own.display()
+            );
+            KeyPlan::Keep
+        }
+        Some(text) if own_signs => {
+            replaceable_key(&own)?;
+            let ToSign { text, key } = to_sign(text, passphrase()?.as_deref())?;
+            KeyPlan::Install {
+                previous: Previous::of(&own, text.as_bytes())?,
+                staged: stage_key(&own, text.as_bytes())?,
+                key: Box::new(key),
+            }
+        }
+        Some(text) => {
+            replaceable_key(&own)?;
+            let restored = fingerprint(text)?;
+            let text = to_keep(text, &restored, passphrase()?.as_deref())?;
+            KeyPlan::Store {
+                previous: Previous::of(&own, text.as_bytes())?,
+                staged: stage_key(&own, text.as_bytes())?,
+                restored,
+            }
+        }
+        None => KeyPlan::Keep,
+    };
+    Ok(SecretsPlan {
+        ca,
+        signing_key,
+        location,
+    })
+}
+
+/// Refuse a restore that would have to replace the server's own key file
+/// `own` and cannot, saying what to do about it.
+fn replaceable_key(own: &Path) -> anyhow::Result<()> {
+    check_replaceable(own).with_context(|| {
+        format!(
+            "the server's signing key {} cannot be replaced; if it is a key you supply, \
+             name it with AURCACHE_SIGNING_KEY_FILE, which a restore never writes",
+            own.display()
+        )
+    })
+}
+
+/// Stage `text` beside the server's own key file `own`.
+fn stage_key(own: &Path, text: &[u8]) -> anyhow::Result<Staged> {
+    stage_private(own, text)
+        .with_context(|| format!("writing beside the signing key {}", own.display()))
+}
+
+/// The dump's signing key `text`'s fingerprint, which reading the dump
+/// already checked it has.
+fn fingerprint(text: &str) -> anyhow::Result<String> {
+    Ok(aurcache_signing::inspect(text.as_bytes())
+        .context("the dump's signing key cannot be read")?
+        .fingerprint)
+}
+
+/// The dump's key, as it will be written and as the server will sign with
+/// it.
+struct ToSign {
+    text: String,
+    key: InstanceKey,
+}
+
+/// The dump's signing key `text`, made ready to sign with on this server:
+/// unlocked with its `passphrase`, saying what to configure when it cannot
+/// be, and refused if it signs nothing now; locked with that passphrase
+/// first if it came unlocked, as the server locks its own.
+fn to_sign(text: &str, passphrase: Option<&str>) -> anyhow::Result<ToSign> {
+    let facts = aurcache_signing::inspect(text.as_bytes())
+        .context("the dump's signing key cannot be read")?;
+    let text = match passphrase {
+        Some(passphrase) if !facts.locked => aurcache_signing::locked(text.as_bytes(), passphrase)
+            .context("locking the dump's signing key with AURCACHE_SIGNING_KEY_PASSPHRASE_FILE")?,
+        _ => text.to_string(),
+    };
+    let key = InstanceKey::parse(text.as_bytes(), passphrase).map_err(|e| {
+        if facts.locked && passphrase.is_none() {
+            anyhow::anyhow!(
+                "the dump's signing key {} is locked with a passphrase, and this server has \
+                 none: set AURCACHE_SIGNING_KEY_PASSPHRASE_FILE to the passphrase it was \
+                 locked with, restart, and restore again",
+                facts.fingerprint
+            )
+        } else if facts.locked {
+            e.context(format!(
+                "the dump's signing key {} cannot be unlocked here; is \
+                 AURCACHE_SIGNING_KEY_PASSPHRASE_FILE the passphrase it was locked with?",
+                facts.fingerprint
+            ))
+        } else {
+            e.context(format!(
+                "the dump's signing key {} cannot sign here",
+                facts.fingerprint
+            ))
+        }
+    })?;
+    Ok(ToSign { text, key })
+}
+
+/// The dump's signing key `text`, with fingerprint `restored`, made ready to
+/// keep on this server without signing with it: whether it signs now is not
+/// asked, but with a `passphrase` configured, it is the one that would
+/// unlock it, so a locked key has to open with it and an unlocked one is
+/// locked with it.
+fn to_keep(text: &str, restored: &str, passphrase: Option<&str>) -> anyhow::Result<String> {
+    let Some(passphrase) = passphrase else {
+        return Ok(text.to_string());
+    };
+    let facts = aurcache_signing::inspect(text.as_bytes())
+        .context("the dump's signing key cannot be read")?;
+    if !facts.locked {
+        return aurcache_signing::locked(text.as_bytes(), passphrase)
+            .context("locking the dump's signing key with AURCACHE_SIGNING_KEY_PASSPHRASE_FILE");
+    }
+    aurcache_signing::check_passphrase(text.as_bytes(), passphrase).with_context(|| {
+        format!(
+            "the dump's signing key {restored} does not unlock with \
+             AURCACHE_SIGNING_KEY_PASSPHRASE_FILE, which would unlock it here"
+        )
+    })?;
+    Ok(text.to_string())
+}
+
+/// What putting a dump's secrets in place did, secret by secret: what a
+/// restore reports, once the rows have committed, as exactly what changed --
+/// or, from [`SecretsPlan::expected`], what a dry run says it would.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretsApplied {
+    pub ca: CaOutcome,
+    pub signing_key: KeyOutcome,
+}
+
+/// What a restore did to the worker CA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaOutcome {
+    /// Nothing: the dump's secrets were not taken.
+    Kept,
+    /// Nothing: the dump's CA is the one in place already.
+    Same,
+    /// The dump's CA is in place; the previous one is not kept. `unsynced`
+    /// says why its directory could not be synced after, when it could not:
+    /// a crash soon after may bring the previous one back.
+    Replaced { unsynced: Option<String> },
+    /// The dump's CA could not be put in place, and the previous one stays
+    /// (at the latest from the next start, which repairs a pair left half
+    /// replaced from its identity copy).
+    Failed { error: String },
+}
+
+/// What a restore did to the repository's signing key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyOutcome {
+    /// Nothing.
+    Kept,
+    /// Put the dump's key, with fingerprint `restored`, in the server's own
+    /// key file and swapped it in ([`Repository::replace_key`]):
+    /// `replacement` says what that changed in what signs --
+    /// [`KeyReplacement::NotSigning`] for a server that does not sign, and
+    /// signs with it once it does.
+    Installed {
+        restored: String,
+        replacement: KeyReplacement,
+        file: KeyFile,
+    },
+    /// Put the dump's key, `restored`, in the server's own key file, which
+    /// the server does not sign with: it signs with the key
+    /// `AURCACHE_SIGNING_KEY_FILE` supplies, `supplied` (`None` when it
+    /// cannot be read), if `signs`, and would sign with it otherwise.
+    BesideSupplied {
+        restored: String,
+        supplied: Option<String>,
+        signs: bool,
+        file: KeyFile,
+    },
+    /// What the plan was to do could not be done, and the key file and the
+    /// key the server signs with are as they were: `error` says what.
+    Failed { error: String },
+}
+
+/// What a restore did to the server's own key file, beside what it put
+/// there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyFile {
+    pub path: PathBuf,
+    /// What the file held before.
+    pub previous: PreviousKey,
+    /// Why its directory could not be synced after, when it could not: the
+    /// change is in place, and every reader sees it, but a crash soon after
+    /// may undo it.
+    pub unsynced: Option<String>,
+}
+
+/// What the server's own key file held before a restore wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviousKey {
+    /// Nothing: there was no file.
+    Absent,
+    /// The very bytes written in its place: nothing is kept.
+    Same,
+    /// Something else, kept beside it at `kept`, owner-only: a key with
+    /// this `fingerprint`, or `None` for a file that does not read as one.
+    Kept {
+        fingerprint: Option<String>,
+        kept: PathBuf,
+    },
+}
+
+impl PreviousKey {
+    /// The fingerprint of the key the file held, when it held one that
+    /// reads.
+    #[must_use]
+    pub fn fingerprint(&self) -> Option<&str> {
+        match self {
+            Self::Kept { fingerprint, .. } => fingerprint.as_deref(),
+            Self::Absent | Self::Same => None,
+        }
+    }
+
+    /// Where it is kept, when it is.
+    #[must_use]
+    pub fn kept(&self) -> Option<&Path> {
+        match self {
+            Self::Kept { kept, .. } => Some(kept),
+            Self::Absent | Self::Same => None,
+        }
+    }
+}
+
+/// What putting the dump's key `restored` in the server's own key file,
+/// `file`, without swapping it in, comes to: kept for when the server signs
+/// with its own key, or beside the key it is supplied.
+async fn stored(
+    location: &KeyLocation,
+    restored: String,
+    file: KeyFile,
+    repo: &Repository,
+) -> KeyOutcome {
+    match location {
+        KeyLocation::Own(_) => KeyOutcome::Installed {
+            restored,
+            replacement: KeyReplacement::NotSigning,
+            file,
+        },
+        KeyLocation::Supplied(_) => KeyOutcome::BesideSupplied {
+            restored,
+            supplied: supplied_key(location, repo).await,
+            signs: repo.key().is_some(),
+            file,
+        },
+    }
+}
+
+impl SecretsPlan {
+    /// What applying it would report should every rename succeed: what a
+    /// dry run says becomes of the secrets.
+    pub async fn expected(&self, repo: &Repository) -> SecretsApplied {
+        let ca = match self.ca {
+            CaPlan::Keep => CaOutcome::Kept,
+            CaPlan::Same => CaOutcome::Same,
+            CaPlan::Replace(_) => CaOutcome::Replaced { unsynced: None },
+        };
+        let file = |staged: &Staged, previous: &Previous| KeyFile {
+            path: staged.target().to_path_buf(),
+            previous: previous.expected.clone(),
+            unsynced: None,
+        };
+        let signing_key = match &self.signing_key {
+            KeyPlan::Keep => KeyOutcome::Kept,
+            KeyPlan::Install {
+                key,
+                staged,
+                previous,
+            } => KeyOutcome::Installed {
+                restored: key.fingerprint().to_string(),
+                replacement: repo.replacing_with(key),
+                file: file(staged, previous),
+            },
+            KeyPlan::Store {
+                restored,
+                staged,
+                previous,
+            } => {
+                stored(
+                    &self.location,
+                    restored.clone(),
+                    file(staged, previous),
+                    repo,
+                )
+                .await
+            }
+        };
+        SecretsApplied { ca, signing_key }
+    }
+}
+
+/// Put in place what `plan` staged, once the rows have committed.
+///
+/// The CA and the key are files, not rows, which is why they cannot share
+/// the transaction that wrote the rows -- and why they are put in place
+/// after it, once nothing is left that could roll back. Everything that
+/// could refuse was checked, and everything new written, by
+/// [`plan_secrets`]: what is left is renames, which can still fail, and
+/// each secret says whether its own did. A rename that succeeded is in place even when its directory
+/// could not be synced after, and is reported so.
+pub async fn apply_secrets(plan: SecretsPlan, repo: &Repository) -> SecretsApplied {
+    let SecretsPlan {
+        ca,
+        signing_key,
+        location,
+    } = plan;
+    let ca = match ca {
+        CaPlan::Keep => CaOutcome::Kept,
+        CaPlan::Same => CaOutcome::Same,
+        CaPlan::Replace(staged) => match blocking(move || staged.install()).await {
+            Ok(installed) => CaOutcome::Replaced {
+                unsynced: unsynced(installed),
+            },
+            Err(e) => CaOutcome::Failed {
+                error: format!("{e:#}"),
+            },
+        },
+    };
+    let signing_key = apply_key(signing_key, location, repo).await;
+    SecretsApplied { ca, signing_key }
+}
+
+/// Do what `plan` decided for the signing key. The key file and the key
+/// the server signs with change together, under the repository lock
+/// ([`Repository::replace_key`]), or not at all.
+async fn apply_key(plan: KeyPlan, location: KeyLocation, repo: &Repository) -> KeyOutcome {
+    let current = || {
+        repo.key().map_or_else(
+            || "the server does not sign".to_string(),
+            |key| format!("the server signs with {} as before", key.fingerprint()),
+        )
+    };
+    let failed = |restored: &str, target: &str, e: anyhow::Error| KeyOutcome::Failed {
+        error: format!(
+            "the dump's signing key {restored} could not be put in {target} ({e:#}); {}",
+            current()
+        ),
+    };
+    match plan {
+        KeyPlan::Keep => KeyOutcome::Kept,
+        KeyPlan::Install {
+            key,
+            staged,
+            previous,
+        } => {
+            let restored = key.fingerprint().to_string();
+            let target = staged.target().display().to_string();
+            match repo
+                .replace_key(*key, move || persist_key(previous, staged))
+                .await
+            {
+                Ok(KeySwap {
+                    replacement,
+                    persisted,
+                }) => KeyOutcome::Installed {
+                    restored,
+                    replacement,
+                    file: persisted,
+                },
+                Err(e) => failed(&restored, &target, e),
+            }
+        }
+        KeyPlan::Store {
+            restored,
+            staged,
+            previous,
+        } => {
+            let target = staged.target().display().to_string();
+            match blocking(move || persist_key(previous, staged)).await {
+                Ok(file) => stored(&location, restored, file, repo).await,
+                Err(e) => failed(&restored, &target, e),
+            }
+        }
+    }
+}
+
+/// Keep what the server's own key file holds, then rename `staged` over it.
+fn persist_key(previous: Previous, staged: Staged) -> anyhow::Result<KeyFile> {
+    let path = staged.target().to_path_buf();
+    let previous_key = previous.expected.clone();
+    let kept = previous
+        .keep()
+        .with_context(|| format!("keeping the signing key {}", path.display()))?;
+    // The copy is beside the file, so the directory synced once the file is
+    // in place makes both durable.
+    let installed = staged
+        .install()
+        .with_context(|| format!("replacing {}", path.display()))?;
+    Ok(KeyFile {
+        path,
+        previous: previous_key,
+        unsynced: unsynced(installed).or_else(|| unsynced(kept)),
+    })
+}
+
+/// Why a file that is in place may not survive a crash, when it may not.
+fn unsynced(installed: Installed) -> Option<String> {
+    match installed {
+        Installed::Synced => None,
+        Installed::Unsynced { error } => Some(error.to_string()),
+    }
+}
+
+/// The fingerprint of the key `AURCACHE_SIGNING_KEY_FILE` supplies: the one
+/// the server signs with, when it signs, and otherwise the one in the file,
+/// `None` when it cannot be read.
+async fn supplied_key(location: &KeyLocation, repo: &Repository) -> Option<String> {
+    if let Some(key) = repo.key() {
+        return Some(key.fingerprint().to_string());
+    }
+    let path = location.path().to_path_buf();
+    blocking(move || {
+        Ok(std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| aurcache_signing::inspect(&bytes).ok())
+            .map(|facts| facts.fingerprint))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Run `work` -- file I/O, key work -- on a blocking thread.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
+    tokio::task::spawn_blocking(work).await?
+}
+
+/// Record in the log what a restore did to the secrets that an operator has
+/// to act on -- workers enroll again under a new CA, and every client trusts
+/// one signing key or another -- and what could not be done. The signing key
+/// is recorded in the words its report line has ([`key_report`]).
+fn record_secrets(activity: &ActivityLog, applied: &SecretsApplied) {
+    match &applied.ca {
+        CaOutcome::Kept | CaOutcome::Same => {}
+        CaOutcome::Replaced { .. } => activity.emit(Event::RestoreCaReplaced {}),
+        CaOutcome::Failed { error } => {
+            tracing::error!("a restore could not put the dump's CA in place: {error}");
+        }
+    }
+    if let Some(report) = key_report(&applied.signing_key)
+        && report.change != SecretChange::Kept
+    {
+        activity.emit(Event::RestoreSigningKeyChanged {
+            change: report.change,
+            detail: report.detail,
+        });
+    }
+    if let KeyOutcome::Failed { error } = &applied.signing_key {
+        tracing::error!("a restore could not change the signing key: {error}");
+    }
+    // In place, but a crash soon after may undo it: said in the log alone,
+    // as the restore's report says what it does, not how durably.
+    if let CaOutcome::Replaced {
+        unsynced: Some(error),
+    } = &applied.ca
+    {
+        activity.emit(Event::RestoreSecretUnsynced {
+            file: "the worker CA".to_string(),
+            error: error.clone(),
+        });
+    }
+    if let KeyOutcome::Installed { file, .. } | KeyOutcome::BesideSupplied { file, .. } =
+        &applied.signing_key
+        && let Some(error) = &file.unsynced
+    {
+        activity.emit(Event::RestoreSecretUnsynced {
+            file: file.path.display().to_string(),
+            error: error.clone(),
+        });
+    }
+}
+
+/// What a restore says it does to each secret it touches, should every
+/// rename succeed: what the answer to it carries, from
+/// [`SecretsPlan::expected`]. A secret it leaves alone has no line, so a
+/// restore that takes none says nothing about secrets; one that could not be
+/// put in place has none either, but a failed entry ([`secret_failures`]).
+#[must_use]
+pub fn secret_reports(applied: &SecretsApplied) -> Vec<SecretReport> {
+    [ca_report(&applied.ca), key_report(&applied.signing_key)]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// The report line for what a restore does to the worker CA.
+fn ca_report(outcome: &CaOutcome) -> Option<SecretReport> {
+    let line = |change: SecretChange, detail: &str| SecretReport {
+        secret: Secret::Ca,
+        change,
+        detail: detail.to_string(),
+    };
+    match outcome {
+        CaOutcome::Kept | CaOutcome::Failed { .. } => None,
+        CaOutcome::Same => Some(line(
+            SecretChange::Kept,
+            "the dump's, which is this server's already: workers keep their certificates",
+        )),
+        CaOutcome::Replaced { .. } => Some(line(
+            SecretChange::Replaced,
+            "the dump's, in place of this server's, which is not kept: every worker \
+             enrolled under it has to enroll again",
+        )),
+    }
+}
+
+/// The report line for what a restore does to the signing key: what the
+/// answer says, and what the activity log records ([`record_secrets`]).
+fn key_report(outcome: &KeyOutcome) -> Option<SecretReport> {
+    match outcome {
+        KeyOutcome::Kept | KeyOutcome::Failed { .. } => None,
+        KeyOutcome::Installed {
+            restored,
+            replacement,
+            file,
+        } => {
+            let signs = match replacement {
+                KeyReplacement::Replaced { previous } => format!(
+                    "the server signs with it in place of {previous}: clients have to trust \
+                     it, and what {previous} signed is signed again"
+                ),
+                KeyReplacement::SignerChanged => "the server signs with it as before, but \
+                     through another of its subkeys: clients have to import the key again to \
+                     know that subkey, and what the one before signed is signed again"
+                    .to_string(),
+                KeyReplacement::Unchanged => "the server signs with it, as before".to_string(),
+                KeyReplacement::NotSigning => {
+                    "the server does not sign, and signs with it once AURCACHE_SIGN is on"
+                        .to_string()
+                }
+            };
+            Some(key_line(restored, file, &signs))
+        }
+        KeyOutcome::BesideSupplied {
+            restored,
+            supplied,
+            signs,
+            file,
+        } => Some(key_line(
+            restored,
+            file,
+            &supplied_note(supplied.as_deref(), *signs),
+        )),
+    }
+}
+
+/// The report line for the dump's key `restored`, written to `file`, and
+/// what the server signs with since, `signs`.
+fn key_line(restored: &str, file: &KeyFile, signs: &str) -> SecretReport {
+    let change = match file.previous {
+        PreviousKey::Absent => SecretChange::Restored,
+        PreviousKey::Same => SecretChange::Kept,
+        PreviousKey::Kept { .. } => SecretChange::Replaced,
+    };
+    SecretReport {
+        secret: Secret::SigningKey,
+        change,
+        detail: format!(
+            "the dump's key {restored} in {}{}; {signs}",
+            file.path.display(),
+            previous_note(&file.previous),
+        ),
+    }
+}
+
+/// The entries a restore adds for what it could not do to the secrets once
+/// the rows had committed, against the restore as a whole: each secret
+/// that failed is as it was.
+fn secret_failures(applied: &SecretsApplied) -> Vec<RestoreEntry> {
+    let ca = match &applied.ca {
+        CaOutcome::Failed { error } => Some(format!(
+            "the packages were imported, but the dump's CA could not be put in place, \
+             and the previous one stays: {error}"
+        )),
+        _ => None,
+    };
+    let key = match &applied.signing_key {
+        KeyOutcome::Failed { error } => Some(format!("the packages were imported, but {error}")),
+        _ => None,
+    };
+    [ca, key]
+        .into_iter()
+        .flatten()
+        .map(|error| RestoreEntry {
+            pkgbase: String::new(),
+            outcome: RestoreOutcome::Failed { error },
+        })
+        .collect()
+}
+
+/// Where the key a restore replaced is kept, for its report line.
+fn previous_note(previous: &PreviousKey) -> String {
+    match previous {
+        PreviousKey::Absent => String::new(),
+        PreviousKey::Same => ", which already held it".to_string(),
+        PreviousKey::Kept {
+            fingerprint: Some(fingerprint),
+            kept,
+        } => format!(
+            "; the key it held, {fingerprint}, is kept as {}",
+            kept.display()
+        ),
+        PreviousKey::Kept {
+            fingerprint: None,
+            kept,
+        } => format!(
+            "; what it held, which does not read as a key, is kept as {}",
+            kept.display()
+        ),
+    }
+}
+
+/// What the server signs with when it is the key `AURCACHE_SIGNING_KEY_FILE`
+/// supplies, `supplied`, for a report line.
+fn supplied_note(supplied: Option<&str>, signs: bool) -> String {
+    let supplied = supplied.unwrap_or("a key that cannot be read");
+    if signs {
+        format!("the server signs with {supplied}, which AURCACHE_SIGNING_KEY_FILE supplies")
+    } else {
+        format!(
+            "the server does not sign; it would sign with {supplied}, which \
+             AURCACHE_SIGNING_KEY_FILE supplies"
+        )
+    }
 }
 
 /// What pass 1 did.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Applied {
     pub entries: Vec<RestoreEntry>,
     /// Packages whose sources and graph the later passes must visit. A skipped
     /// package is not among them: it was already here, with its own resolution
     /// already done.
     pub touched: Vec<String>,
+    /// Whether the transaction that wrote them is known to have committed,
+    /// and the repository's files with it.
+    pub commit: RowsCommit,
+}
+
+/// Whether the rows a restore wrote are in, and the repository's files with
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowsCommit {
+    /// Committed, and the repository's files are in place.
+    Done,
+    /// Committed, but the repository's files are not all in place, for
+    /// `error` ([`FinalizationPending`]): its recorded plan finishes them at
+    /// the next update or start.
+    FilesPending { error: String },
+    /// The COMMIT was sent and failed in a way that leaves unknown whether it
+    /// took effect, for `error` ([`CommitOutcome::Unknown`]): the rows may
+    /// be in or not, and the entries only say what they would be.
+    Unknown { error: String },
 }
 
 /// Insert and update the rows, in one transaction.
@@ -544,19 +1453,65 @@ pub async fn write_rows(
             update.retire(&file)?;
         }
     }
-    let applied = update
+    // What the transaction that committed wrote, for when finalizing the
+    // repository after it fails: the rows are in, and only the files wait.
+    let committed = Arc::new(std::sync::Mutex::new(None));
+    let result = update
         .commit(db, |txn| {
             let dump = dump.clone();
             let options = options.clone();
-            Box::pin(async move { write_rows_txn(txn, &dump, &options).await })
+            let committed = Arc::clone(&committed);
+            Box::pin(async move {
+                let applied = write_rows_txn(txn, &dump, &options).await?;
+                *committed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(applied.clone());
+                Ok(applied)
+            })
         })
-        .await?;
+        .await;
+    let written = committed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let applied = rows_commit(result, written)?;
 
-    // `--clear` removes every package, so every build log goes with them.
-    if options.clear {
+    // `--clear` removes every package, so every build log goes with them --
+    // once the packages are known to be gone.
+    if options.clear && !matches!(applied.commit, RowsCommit::Unknown { .. }) {
         crate::build_logger::remove_all_logs().await;
     }
     Ok(applied)
+}
+
+/// What committing pass 1 came to, from `result`, what the update's commit
+/// returned, and `written`, what its transaction wrote before its COMMIT
+/// was sent: an error only for rows known not to have committed.
+fn rows_commit(
+    result: anyhow::Result<Applied>,
+    written: Option<Applied>,
+) -> anyhow::Result<Applied> {
+    let error = match result {
+        Ok(applied) => return Ok(applied),
+        Err(error) => error,
+    };
+    let Some(commit) = error
+        .downcast_ref::<FinalizationPending>()
+        .map(|pending| pending.commit)
+    else {
+        return Err(error);
+    };
+    let Some(applied) = written else {
+        return Err(error);
+    };
+    let error = format!("{error:#}");
+    Ok(Applied {
+        commit: match commit {
+            CommitOutcome::Committed => RowsCommit::FilesPending { error },
+            CommitOutcome::Unknown => RowsCommit::Unknown { error },
+        },
+        ..applied
+    })
 }
 
 /// The transaction [`write_rows`] commits: run again whole if it fails.
@@ -633,7 +1588,11 @@ async fn write_rows_txn(
     write_settings(txn, dump, &ids).await?;
     write_workers(txn, dump, options).await?;
     write_tokens(txn, dump, options).await?;
-    Ok(Applied { entries, touched })
+    Ok(Applied {
+        entries,
+        touched,
+        commit: RowsCommit::Done,
+    })
 }
 
 /// Remove the rows of everything a dump replaces. Their artifacts leave the
@@ -891,8 +1850,9 @@ async fn fill_source_facts(
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_existing, load_dump};
-    use aurcache_common::api::dump::DUMP_SCHEMA_VERSION;
+    use super::{Applied, RowsCommit, clear_existing, load_dump, rows_commit};
+    use crate::repository::FinalizationPending;
+    use aurcache_common::api::dump::{DUMP_SCHEMA_VERSION, RestoreEntry, RestoreOutcome};
     use aurcache_common::build_state::BuildState;
     use std::collections::BTreeMap;
 
@@ -1134,10 +2094,74 @@ mod tests {
         );
 
         let loaded = load(files).unwrap();
+        // Printing it says it carries secrets, and not what they are.
+        let printed = format!("{loaded:?}");
+        assert!(printed.contains("DumpSecrets"), "{printed}");
+        assert!(
+            !printed.contains("\"key\"") && !printed.contains("abc"),
+            "{printed}"
+        );
         let secrets = loaded.secrets.expect("secrets were dropped");
         assert_eq!(secrets.ca_key_pem, "key");
         assert_eq!(secrets.tokens.len(), 1);
         assert_eq!(secrets.tokens[0].username, "alice");
+    }
+
+    /// What pass 1 wrote before its COMMIT was sent.
+    fn written() -> Applied {
+        Applied {
+            entries: vec![RestoreEntry {
+                pkgbase: "hello".to_string(),
+                outcome: RestoreOutcome::Imported,
+            }],
+            touched: vec!["hello".to_string()],
+            commit: RowsCommit::Done,
+        }
+    }
+
+    /// Rows that committed while the repository's files wait are imported;
+    /// rows whose COMMIT may or may not have taken effect are neither
+    /// imported nor refused, and say so; any other error is a refusal.
+    #[test]
+    fn a_commit_is_told_from_one_whose_outcome_is_unknown() {
+        let pending = |error: FinalizationPending| Err(anyhow::Error::new(error));
+
+        let applied = rows_commit(
+            pending(FinalizationPending::committed(anyhow::anyhow!(
+                "a rename failed"
+            ))),
+            Some(written()),
+        )
+        .unwrap();
+        assert!(
+            matches!(&applied.commit, RowsCommit::FilesPending { error } if error.contains("a rename failed")),
+            "{applied:?}"
+        );
+        assert_eq!(applied.touched, ["hello"]);
+
+        let applied = rows_commit(
+            pending(FinalizationPending::unknown(anyhow::anyhow!(
+                "the connection was lost"
+            ))),
+            Some(written()),
+        )
+        .unwrap();
+        assert!(
+            matches!(&applied.commit, RowsCommit::Unknown { error } if error.contains("the connection was lost")),
+            "{applied:?}"
+        );
+
+        assert!(
+            rows_commit(
+                Err(anyhow::anyhow!("the database said no")),
+                Some(written())
+            )
+            .is_err()
+        );
+        assert_eq!(
+            rows_commit(Ok(written()), None).unwrap().commit,
+            RowsCommit::Done
+        );
     }
 
     /// A patch reaches the package it names.

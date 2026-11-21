@@ -31,12 +31,16 @@ pub const WORKERS_FILE: &str = "workers.json";
 pub const PATCH_DIR: &str = "patches";
 /// The CA certificate, present only in a dump taken with secrets.
 pub const CA_CERT_FILE: &str = "ca-cert.pem";
-/// The CA private key. The most dangerous thing a dump can contain: it signs
-/// worker identities, so anyone holding it can mint a certificate this server
-/// accepts as a worker.
+/// The CA private key: it signs worker identities, so anyone holding it can
+/// mint a certificate this server accepts as a worker.
 pub const CA_KEY_FILE: &str = "ca-key.pem";
 /// API token hashes, present only in a dump taken with secrets.
 pub const TOKENS_FILE: &str = "tokens.json";
+/// The repository's signing key, armored, locked if the server's is: present
+/// only in a dump taken with secrets, from a server that has one. Unless it
+/// is locked, the most dangerous thing a dump can contain: anyone holding it
+/// can sign packages that every client trusting the repository installs.
+pub const SIGNING_KEY_FILE: &str = "signing-key.asc";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -48,9 +52,10 @@ pub struct DumpManifest {
     pub aurcache_version: String,
     /// Unix seconds.
     pub created_at: i64,
-    /// Whether the archive carries the CA, worker certificates and token
-    /// hashes. A dump with this set is dangerous to share -- the CA private
-    /// key mints worker identities the server accepts.
+    /// Whether the archive carries the CA, worker certificates, token hashes
+    /// and the repository's signing key. A dump with this set is dangerous to
+    /// share -- the CA private key mints worker identities the server accepts,
+    /// and the signing key signs what clients install.
     pub includes_secrets: bool,
 }
 
@@ -147,28 +152,47 @@ pub type DumpPackages = BTreeMap<String, DumpPackage>;
 /// certificates, as one unit: a signed certificate is only meaningful under the
 /// CA that signed it.
 ///
-/// The repository's signing key never does. Every client that trusts it
-/// installs as root whatever it signs, from anywhere, for as long as it is
-/// trusted -- long after the instance a dump was taken from is gone. It moves
-/// only as the file it is, copied on purpose.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// The repository's signing key travels with them, so that an instance
+/// reinstalled or moved from a dump signs with the key its clients already
+/// trust: pacman refuses a signature from any other, even where signatures
+/// are optional. That makes such a dump as dangerous as the key itself --
+/// whoever holds it can sign packages that every client trusting the
+/// repository installs as root, until the key is replaced -- unless the key
+/// is locked with a passphrase, which a dump never carries.
+///
+/// Its `Debug` says what it holds, never the keys or token hashes
+/// themselves, so that logging a dump cannot leak them.
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct DumpSecrets {
     pub ca_cert_pem: String,
     pub ca_key_pem: String,
     pub tokens: Vec<DumpToken>,
+    /// The signing key, armored, exactly as the server keeps it -- its own or
+    /// one supplied with `AURCACHE_SIGNING_KEY_FILE`, locked if it is. `None`
+    /// when the server has none.
+    pub signing_key: Option<String>,
+}
+
+impl std::fmt::Debug for DumpSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DumpSecrets")
+            .field("tokens", &self.tokens.len())
+            .field("signing_key", &self.signing_key.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// What to do about secrets a dump carries.
 ///
 /// Defaults to leaving them alone, and not for symmetry with the package
 /// policy: replacing a CA invalidates every certificate the current workers
-/// hold, which is a destructive act in the mode whose whole promise is that it
-/// only adds.
+/// hold, and replacing the signing key every client's trust in this instance,
+/// destructive acts in the mode whose whole promise is that it only adds.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SecretsPolicy {
-    /// Leave this instance's CA and tokens as they are.
+    /// Leave this instance's CA, tokens and signing key as they are.
     #[default]
     Ignore,
     /// Take the dump's, replacing what is here.
@@ -307,7 +331,68 @@ impl RestoreOutcome {
     }
 }
 
-/// One line of an import's report.
+/// One of this server's secrets, which an import says what it does to
+/// beside its packages ([`SecretReport`]).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Secret {
+    /// The CA that signs every worker's certificate.
+    Ca,
+    /// The key the repository signs with.
+    SigningKey,
+}
+
+impl Secret {
+    /// What a report line calls it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ca => "worker CA",
+            Self::SigningKey => "signing key",
+        }
+    }
+}
+
+/// What an import does, or did, to one of this server's secrets.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SecretChange {
+    /// Left as it is.
+    Kept,
+    /// The dump's, where this server had none.
+    Restored,
+    /// The dump's, in place of this server's.
+    Replaced,
+}
+
+impl SecretChange {
+    /// The change in one word, as a report line shows it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Kept => "kept",
+            Self::Restored => "restored",
+            Self::Replaced => "replaced",
+        }
+    }
+}
+
+/// What an import does to one of this server's secrets, should every rename
+/// succeed: in a word (`change`) and in a sentence (`detail`). A rename that
+/// fails after the packages are in is a failed [`RestoreEntry`] of the
+/// import, against the dump as a whole.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SecretReport {
+    pub secret: Secret,
+    pub change: SecretChange,
+    pub detail: String,
+}
+
+/// One line of an import's report: about a package, or -- `pkgbase` empty
+/// and failed -- about the dump as a whole.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RestoreEntry {
@@ -331,11 +416,157 @@ pub struct RestoreAccepted {
     /// Populated only for a dry run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<RestoreEntry>,
+    /// What the import does to each of this server's secrets, should every
+    /// rename succeed -- for a dry run and a restore alike; empty when it
+    /// takes none. Apart from `preview`, whose entries are packages, so that
+    /// a client that knows nothing of secrets reads the answer as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<SecretReport>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ExistingPackagePolicy, SecretsPolicy};
+    use super::{
+        DumpSecrets, DumpToken, ExistingPackagePolicy, RestoreAccepted, RestoreEntry,
+        RestoreOutcome, Secret, SecretChange, SecretReport, SecretsPolicy,
+    };
+
+    /// Printing a dump's secrets says what it holds, never the keys or
+    /// token hashes themselves.
+    #[test]
+    fn secrets_are_not_printed() {
+        let secrets = DumpSecrets {
+            ca_cert_pem: "CA-CERTIFICATE".to_string(),
+            ca_key_pem: "CA-PRIVATE-KEY".to_string(),
+            tokens: vec![DumpToken {
+                username: "me".to_string(),
+                token_hash: "TOKEN-HASH".to_string(),
+            }],
+            signing_key: Some("SIGNING-KEY".to_string()),
+        };
+        let printed = format!("{secrets:?} {secrets:#?}");
+        for secret in [
+            "CA-CERTIFICATE",
+            "CA-PRIVATE-KEY",
+            "TOKEN-HASH",
+            "SIGNING-KEY",
+        ] {
+            assert!(!printed.contains(secret), "{printed}");
+        }
+        assert!(printed.contains("signing_key: true"), "{printed}");
+    }
+
+    /// A secret's report goes over the wire as named fields, apart from the
+    /// packages.
+    #[test]
+    fn a_secret_report_round_trips() {
+        let report = SecretReport {
+            secret: Secret::SigningKey,
+            change: SecretChange::Replaced,
+            detail: "the dump's".to_string(),
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["secret"], "signing_key");
+        assert_eq!(json["change"], "replaced");
+        assert_eq!(
+            serde_json::from_value::<SecretReport>(json).unwrap(),
+            report
+        );
+        assert_eq!(report.change.label(), "replaced");
+        assert_eq!(report.secret.label(), "signing key");
+    }
+
+    /// What a 0.6.0 client decodes: its `RestoreAccepted`, `RestoreEntry` and
+    /// `RestoreOutcome`, as they were released. An answer carrying secrets,
+    /// a dry run's and a restore's, and a restore's entries -- packages, and
+    /// a secret that failed, against the dump as a whole -- all read with
+    /// them, the secrets left out.
+    mod released {
+        use serde::Deserialize;
+
+        #[derive(Deserialize, Debug, PartialEq, Eq)]
+        #[serde(rename_all = "snake_case", tag = "outcome")]
+        pub enum RestoreOutcome {
+            Imported,
+            Skipped,
+            Overwritten,
+            PatchAdopted,
+            Failed { error: String },
+        }
+
+        #[derive(Deserialize, Debug, PartialEq, Eq)]
+        pub struct RestoreEntry {
+            pub pkgbase: String,
+            #[serde(flatten)]
+            pub outcome: RestoreOutcome,
+        }
+
+        #[derive(Deserialize, Debug, PartialEq, Eq)]
+        pub struct RestoreAccepted {
+            pub job_id: Option<i32>,
+            pub total: i32,
+            #[serde(default)]
+            pub preview: Vec<RestoreEntry>,
+        }
+    }
+
+    #[test]
+    fn a_released_client_reads_what_a_restore_answers() {
+        let secrets = vec![SecretReport {
+            secret: Secret::Ca,
+            change: SecretChange::Replaced,
+            detail: "the dump's".to_string(),
+        }];
+        let dry_run = RestoreAccepted {
+            job_id: None,
+            total: 1,
+            preview: vec![RestoreEntry {
+                pkgbase: "hello".to_string(),
+                outcome: RestoreOutcome::Imported,
+            }],
+            secrets: secrets.clone(),
+        };
+        let read: released::RestoreAccepted =
+            serde_json::from_str(&serde_json::to_string(&dry_run).unwrap()).unwrap();
+        assert_eq!(read.total, 1);
+        assert_eq!(
+            read.preview,
+            [released::RestoreEntry {
+                pkgbase: "hello".to_string(),
+                outcome: released::RestoreOutcome::Imported,
+            }]
+        );
+
+        let started = RestoreAccepted {
+            job_id: Some(7),
+            total: 1,
+            preview: Vec::new(),
+            secrets,
+        };
+        let read: released::RestoreAccepted =
+            serde_json::from_str(&serde_json::to_string(&started).unwrap()).unwrap();
+        assert_eq!(read.job_id, Some(7));
+        assert!(read.preview.is_empty());
+
+        for entry in [
+            RestoreEntry {
+                pkgbase: "hello".to_string(),
+                outcome: RestoreOutcome::Overwritten,
+            },
+            RestoreEntry {
+                pkgbase: String::new(),
+                outcome: RestoreOutcome::Failed {
+                    error: "the packages were imported, but the dump's CA could not be put \
+                            in place"
+                        .to_string(),
+                },
+            },
+        ] {
+            let read: released::RestoreEntry =
+                serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+            assert_eq!(read.pkgbase, entry.pkgbase);
+        }
+    }
 
     /// Every policy parses back from the spelling it is sent as.
     #[test]

@@ -12,6 +12,7 @@ use aurcache_common::api::dump::{
 };
 use aurcache_common::api::operations::OperationProgress;
 use aurcache_db::helpers::operations;
+use aurcache_utils::restore::SecretsConfig;
 use aurcache_utils::services::Services;
 use rocket::FromForm;
 use rocket::data::Data;
@@ -21,6 +22,7 @@ use rocket::serde::json::Json;
 use rocket::{Responder, State, get, post};
 use sea_orm::DatabaseConnection;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 use utoipa::OpenApi;
 
@@ -61,9 +63,10 @@ fn dump_file_name(created_at: i64) -> String {
 /// Export packages, settings and approved workers as a `.tar.gz`.
 ///
 /// Authored state only -- build history, logs and the resolved dependency graph
-/// are rebuilt by the next resolve and are not carried. No secrets: the CA and
-/// worker certificates are deliberately absent, so this is safe to keep
-/// alongside ordinary backups.
+/// are rebuilt by the next resolve and are not carried. No secrets: the CA,
+/// worker certificates and signing key are deliberately absent, so this is
+/// safe to keep alongside ordinary backups. `include_secrets` adds them, and
+/// makes the archive as dangerous as the repository's signing key.
 #[get("/dump?<include_secrets>")]
 pub async fn dump(
     services: &State<Services>,
@@ -77,18 +80,21 @@ pub async fn dump(
         // Logged loudly and by name. The CA private key signs worker
         // identities, so whoever takes a copy can mint a worker this server
         // accepts -- for as long as the CA lives, and regardless of whether
-        // their own access is revoked later. That is worth a line in the log
-        // even when it is entirely legitimate.
+        // their own access is revoked later. The signing key, unless it is
+        // locked, signs what every client trusting the repository installs.
+        // That is worth a line in the log even when it is entirely legitimate.
         warn!(
             "Exporting a dump WITH SECRETS (CA private key, worker certificates, \
-             token hashes), requested by {}",
+             token hashes, repository signing key), requested by {}",
             a.username.as_deref().unwrap_or("an unauthenticated caller")
         );
     }
     let dump = aurcache_utils::dump::build_dump(
         &services.db,
         &version.0,
-        with_secrets.then(|| ca_dir.0.as_path()),
+        with_secrets.then(|| aurcache_utils::dump::SecretSources {
+            ca_dir: ca_dir.0.as_path(),
+        }),
     )
     .await?;
     services.activity.emit_by(
@@ -143,9 +149,12 @@ pub struct RestoreQuery {
 
 /// Restore a dump, returning before it has finished.
 ///
-/// The whole archive is validated first, so a dump that would be refused is
-/// refused before anything is written. A dry run answers with what it *would*
-/// do and no job id, because there is nothing to watch.
+/// The whole archive is validated first, and what becomes of the secrets
+/// decided, so a dump that would be refused is refused before anything is
+/// written -- a dry run included. The answer says what becomes of each secret
+/// should every rename succeed (`secrets`); a dry run also says what it
+/// *would* do to each package, and has no job id, because there is nothing
+/// to watch.
 ///
 /// Otherwise the rows are written in one transaction and the slow half -- one
 /// source read per package, then the dependency graph -- runs detached, with
@@ -155,7 +164,8 @@ pub struct RestoreQuery {
     params(RestoreQuery),
     responses(
             (status = 202, description = "Restore started, or for a dry run what it would do", body = RestoreAccepted),
-            (status = 400, description = "Not a dump this server can read, or an unknown policy"),
+            (status = 400, description = "Not a dump this server can read, an unknown policy, or secrets that cannot all be put in place"),
+            (status = 409, description = "Another restore is still running"),
             (status = 413, description = "Larger than any dump this server reads"),
     )
 )]
@@ -195,30 +205,55 @@ pub async fn restore(
         aurcache_utils::restore::load_dump(&bytes.value).map_err(|e| err(Status::BadRequest, e))?;
     let total = i32::try_from(loaded.packages.len()).unwrap_or(i32::MAX);
 
+    // Taken before the secrets are planned: two restores would each plan
+    // from what the other is changing.
+    let running = if options.dry_run {
+        None
+    } else {
+        Some(Restoring::begin().ok_or_else(|| {
+            err(
+                Status::Conflict,
+                "a restore is already running; wait for it to finish",
+            )
+        })?)
+    };
+    // Everything the secrets need, checked before anything is written: a
+    // restore that could not finish is refused whole.
+    let plan = aurcache_utils::restore::plan_secrets(
+        &loaded,
+        &options,
+        SecretsConfig::from_env(&ca_dir.0, &services.repo),
+    )
+    .await
+    .map_err(|e| {
+        let verb = if options.dry_run { "would be" } else { "was" };
+        err(
+            Status::BadRequest,
+            format!("nothing {verb} imported: {e:#}"),
+        )
+    })?;
+    let secrets = aurcache_utils::restore::secret_reports(&plan.expected(&services.repo).await);
+
     if options.dry_run {
+        // What the plan staged goes when it is dropped.
+        drop(plan);
         let preview = aurcache_utils::restore::preview(&services.db, &loaded, &options).await?;
         return Ok(status::Accepted(Json(RestoreAccepted {
             job_id: None,
             total,
             preview,
+            secrets,
         })));
     }
 
     let services_task = services.inner().clone();
-    let ca_dir_task = ca_dir.inner().clone();
     let job_id = operation::start(
         services,
         operations::KIND_RESTORE,
         total,
         move |progress| async move {
-            aurcache_utils::restore::apply(
-                &services_task,
-                &ca_dir_task.0,
-                loaded,
-                options,
-                progress,
-            )
-            .await;
+            let _running = running;
+            aurcache_utils::restore::apply(&services_task, plan, loaded, options, progress).await;
         },
         RestoreRecorder {
             activity: services.activity.clone(),
@@ -233,7 +268,32 @@ pub async fn restore(
         job_id: Some(job_id),
         total,
         preview: Vec::new(),
+        secrets,
     })))
+}
+
+/// Whether a restore is running in this server.
+static RESTORE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// The one restore this server runs at a time, until it is dropped -- when
+/// the restore ends, however it ends. Two at once would each decide about
+/// the same secrets and rows from what the other is changing.
+struct Restoring;
+
+impl Restoring {
+    /// The restore, or `None` while another runs.
+    fn begin() -> Option<Self> {
+        RESTORE_RUNNING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for Restoring {
+    fn drop(&mut self) {
+        RESTORE_RUNNING.store(false, Ordering::Release);
+    }
 }
 
 /// Counts a restore's packages, and logs how many it brought in.
@@ -299,7 +359,17 @@ pub async fn restore_progress(
 
 #[cfg(test)]
 mod tests {
-    use super::dump_file_name;
+    use super::{Restoring, dump_file_name};
+
+    /// One restore at a time: a second is refused until the first ends.
+    #[test]
+    fn a_second_restore_waits_for_the_first_to_end() {
+        let first = Restoring::begin().expect("nothing else restores in this test binary");
+        assert!(Restoring::begin().is_none());
+        drop(first);
+        let again = Restoring::begin();
+        assert!(again.is_some());
+    }
 
     /// Dated, so a directory of backups sorts chronologically and two dumps
     /// taken on different days do not overwrite each other.

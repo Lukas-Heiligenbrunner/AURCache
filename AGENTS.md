@@ -150,7 +150,8 @@ defect this frontend has had was of that kind.
 - `backend/aurcache-ca` is the internal certificate authority: it issues the server's certificate and
   signs a worker's CSR on approval; workers are known by their key's fingerprint.
 - `backend/aurcache-signing` is the repository's OpenPGP key (rPGP, no `gpg`): created, loaded and
-  unlocked from a file, and signing what `Repository` publishes. Nothing hands its secret out.
+  unlocked from a file, and signing what `Repository` publishes. A loaded key never hands its secret
+  out; only the file, as stored, goes into a dump with secrets.
 - `backend/pacman-repo-utils` writes pacman's `repo.db`/`repo.files` (only ever through
   `Repository`, see below), and `backend/pacman-mirrors` fetches and parses the Arch mirror list.
 - Workers are separate processes. `backend/aurcache-worker-core` is everything that makes one a worker
@@ -248,7 +249,12 @@ defect this frontend has had was of that kind.
   renames each signature right after what it signs. Packages published before signing, or under
   another key, are signed by `aurcache_utils::signing::backfill` through `Update::resign`, and
   databases no update has signed through `Update::rewrite_databases`; never write a `.sig` into a
-  platform directory any other way. The key is a file beside the CA, never a row and never in a dump.
+  platform directory any other way. The key is a file beside the CA, never a row; like the CA it is in
+  a dump only with secrets, read from its file as stored. A restore plans its secrets before it is
+  accepted (`restore::plan_secrets`, in the route; refused whole, `400`, otherwise), staging every new
+  file and a copy of the key file it replaces (`fs::stage_replaced`) beside what it replaces;
+  after the commit `apply_secrets` only renames. Its answer says what it does to each secret
+  (`RestoreAccepted::secrets`); its entries stay packages, so a released CLI still reads them.
   `Repository::replace_key` writes another key's file and swaps it in together, under the repository
   lock; an update refuses a package signed with a replaced key (`SignedWithReplacedKey`), which
   publishing retries rather than fails.

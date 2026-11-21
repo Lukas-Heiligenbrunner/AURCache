@@ -23,9 +23,22 @@ pub fn sha256_hex_of(mut reader: impl std::io::Read) -> std::io::Result<String> 
     }
 }
 
+/// A short name for what `bytes` hold, `sha256-` and the first 16 hex digits
+/// of their SHA-256: what a copy of a file that is not a key is kept under
+/// ([`crate::fs::replaced_name`]), the same for the same contents.
+#[must_use]
+pub fn content_tag(bytes: impl AsRef<[u8]>) -> String {
+    format!("sha256-{}", &sha256_hex(bytes)[..16])
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{sha256_hex, sha256_hex_of};
+    use super::{content_tag, sha256_hex, sha256_hex_of};
+
+    #[test]
+    fn a_content_tag_is_a_short_digest() {
+        assert_eq!(content_tag(b""), "sha256-e3b0c44298fc1c14");
+    }
 
     #[test]
     fn is_lowercase_hex_of_the_digest() {

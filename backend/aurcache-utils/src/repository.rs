@@ -485,7 +485,7 @@ impl Update<'_> {
                     return match plan_row::read(db).await {
                         Ok(Some(recorded)) if recorded == serialized => Ok(done),
                         Ok(_) => Err(error.into()),
-                        Err(read) => Err(anyhow::Error::new(FinalizationPending(
+                        Err(read) => Err(anyhow::Error::new(FinalizationPending::unknown(
                             anyhow::Error::new(error)
                                 .context(format!("and the plan could not be read back: {read}")),
                         ))),
@@ -516,7 +516,7 @@ impl Update<'_> {
         self.repo
             .finalize(db, plan, Arc::clone(&self.lock))
             .await
-            .map_err(|error| anyhow::Error::new(FinalizationPending(error)))?;
+            .map_err(|error| anyhow::Error::new(FinalizationPending::committed(error)))?;
         Ok(committed)
     }
 }
@@ -987,7 +987,7 @@ impl Repository {
             let plan: Finalization = serde_json::from_str(&serialized)?;
             self.finalize(db, plan, lock)
                 .await
-                .map_err(|error| anyhow::Error::new(FinalizationPending(error)))?;
+                .map_err(|error| anyhow::Error::new(FinalizationPending::committed(error)))?;
         }
         Ok(())
     }
@@ -1351,12 +1351,60 @@ impl Finalization {
     }
 }
 
-/// SQL has committed; the filesystem plan must be replayed before any new update.
+/// An update's SQL committed, or may have, and its files are not all in
+/// place: the recorded plan, if there is one, is replayed before any new
+/// update. `commit` says which; either way the update must not be treated
+/// as rolled back.
 #[derive(Debug)]
-pub struct FinalizationPending(pub(crate) anyhow::Error);
+pub struct FinalizationPending {
+    pub commit: CommitOutcome,
+    pub(crate) error: anyhow::Error,
+}
+
+/// Whether an update's SQL is known to have committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// It did: only its files wait, for the recorded plan.
+    Committed,
+    /// The COMMIT was sent and failed in a way that leaves unknown whether it
+    /// took effect -- a connection lost once it was sent -- and the plan row
+    /// that would tell could not be read back. If it committed, the plan
+    /// finishes its files; if not, nothing changed. Only reading the
+    /// database again tells which.
+    Unknown,
+}
+
+impl FinalizationPending {
+    /// For an update whose SQL committed and whose files failed for `error`.
+    pub(crate) fn committed(error: anyhow::Error) -> Self {
+        Self {
+            commit: CommitOutcome::Committed,
+            error,
+        }
+    }
+
+    /// For an update whose COMMIT failed for `error`, leaving its outcome
+    /// unknown.
+    pub(crate) fn unknown(error: anyhow::Error) -> Self {
+        Self {
+            commit: CommitOutcome::Unknown,
+            error,
+        }
+    }
+}
+
 impl std::fmt::Display for FinalizationPending {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "repository finalization pending: {:#}", self.0)
+        match self.commit {
+            CommitOutcome::Committed => {
+                write!(f, "repository finalization pending: {:#}", self.error)
+            }
+            CommitOutcome::Unknown => write!(
+                f,
+                "whether the repository update committed is unknown: {:#}",
+                self.error
+            ),
+        }
     }
 }
 impl std::error::Error for FinalizationPending {}
@@ -2038,6 +2086,50 @@ mod tests {
         assert!(x86.join(FILES_ARCHIVE).exists());
         assert!(x86.join("mirrorlist").exists());
         assert!(orphan_dir.join("bar-1.0-1-aarch64.pkg.tar.zst").exists());
+    }
+
+    /// A COMMIT that fails while the plan that would tell whether it took
+    /// effect cannot be read back leaves the update's outcome unknown, and
+    /// says so: told apart from an update that committed and whose files
+    /// alone wait, and not retried as one that committed nothing.
+    #[tokio::test]
+    async fn a_commit_whose_outcome_cannot_be_read_back_is_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(tmp.path());
+        let db = aurcache_db::testing::memory_db().await;
+        let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+        let attempts = AtomicU32::new(0);
+        let mut update = repo.begin(&db).await.unwrap();
+        update.add(Platform::X86_64, staged, entry);
+        let pool = db.clone();
+        let error = update
+            .commit(&db, |txn| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let pool = pool.clone();
+                Box::pin(async move {
+                    // Refused only by the COMMIT: a file of no package.
+                    txn.execute_unprepared("PRAGMA defer_foreign_keys = ON")
+                        .await?;
+                    txn.execute_unprepared(
+                        "INSERT INTO files (filename, platform, package_id) \
+                         VALUES ('orphan', 'x86_64', 999)",
+                    )
+                    .await?;
+                    // And nothing can be read after it, the plan row
+                    // included: the pool closes, its one connection in use.
+                    tokio::spawn(async move { pool.close().await });
+                    tokio::task::yield_now().await;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap_err();
+        let pending = error
+            .downcast_ref::<FinalizationPending>()
+            .expect("not taken for a commit that changed nothing");
+        assert_eq!(pending.commit, CommitOutcome::Unknown);
+        assert!(format!("{error:#}").contains("unknown"), "{error:#}");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "not tried again");
     }
 
     /// A commit that fails for good leaves the repository exactly as it was:

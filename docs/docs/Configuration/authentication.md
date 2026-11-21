@@ -23,6 +23,25 @@ I've tested this with Authentik, but it should work with any OAuth2 provider if 
 
 To disable Authentiation leave all `OAUTH_*` variables undefined. 
 
+## Without sign-in
+
+With no `OAUTH_*` variables set, every caller counts as signed in: the web UI
+and the whole API, `aurcli` included, need no token. That includes what only
+an administrator should do. Anyone who can reach the API can download a
+[dump with secrets](../cli/maintenance.md) (`GET /api/dump?include_secrets=true`)
+— the worker CA's private key and the repository's [signing
+key](./pacman-repo.md#the-key), unlocked unless it is locked with a
+passphrase — and restore one of their own (`POST /api/restore?secrets=copy`),
+replacing both. With either, they can sign packages every client trusting the
+repository installs as root, and mint workers the server accepts.
+
+So leave sign-in off only where nobody you would not hand the signing key to
+can reach the API: listening on localhost or a private network
+(`AURCACHE_HTTP_LISTEN_ADDRESS`, see
+[Where the server listens](./environment-variables.md#where-the-server-listens)),
+or behind a proxy that authenticates. Anywhere else, and on any instance that
+signs its repository, configure sign-in as below.
+
 ## Restricting who may sign in
 
 By default any account your provider will authenticate can sign in. With a
