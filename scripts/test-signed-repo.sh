@@ -71,8 +71,8 @@ grep -q "is unknown" /tmp/out || { cat /tmp/out; fail "1: refused for another re
 echo "ok 1: refused while the key is not trusted"
 reset
 
-# From a pipe, as the documented command and `aurcli repo config --install`
-# feed it: `--add -`, since pacman-key refuses `--add` with no argument.
+# From a pipe, as the documented command feeds it: `--add -`, since
+# pacman-key refuses `--add` with no argument.
 cat /w/key.asc | pacman-key --add - >/dev/null 2>&1 || fail "pacman-key --add -"
 pacman-key --lsign-key "$FINGERPRINT" >/dev/null 2>&1 || fail "pacman-key --lsign-key"
 conf "Required"

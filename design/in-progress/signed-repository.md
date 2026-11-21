@@ -1,9 +1,9 @@
 # Signed packages and a signed repository
 
 Status: **In progress** (server-side signing of packages and databases, the
-backfill, key publication, CLI and web UI done; rotation, workers verifying,
-a keyring package and a staged rollout open — see [What is left](#what-is-left))
-· Last updated: 2026-11-19
+backfill and key publication done; the CLI's and web UI's trust flow, rotation,
+workers verifying, a keyring package and a staged rollout open — see [What is
+left](#what-is-left)) · Last updated: 2026-11-20
 
 Upstream issue: Lukas-Heiligenbrunner/AURCache#274 ("Feature: Signed packages &
 repo"). It asks for three things:
@@ -26,17 +26,13 @@ fits into `Repository`.
   signs each package before the lock, `stage_databases` signs each database
   it writes, and the plan moves each signature in right after what it signs.
   `init` links `repo.db.sig`/`repo.files.sig`, or removes them when the
-  repository no longer signs. `sign_databases` signs databases no update has
-  rewritten since signing began.
-- `aurcache_utils::signing::backfill` and the background job that runs it
-  (`aurcache-scheduler/src/signing_backfill.rs`): packages published unsigned,
-  or under another key, signed through `Update::resign`.
-- `GET /api/repo/key` (no authentication) and `signing` in
-  `GET /api/repo/info`.
-- `aurcli repo config`: `SigLevel = Required` and the commands to trust the
-  key; `--install` offers to run them, behind a prompt showing the
-  fingerprint.
-- The Settings page's *Repository signing* section.
+  repository no longer signs.
+- `aurcache_utils::signing::Backfiller::run` and the background job that runs
+  it (`aurcache-scheduler/src/signing_backfill.rs`): packages published
+  unsigned, or under another key, signed through `Update::resign`, and
+  databases no update has signed since, through `Update::rewrite_databases`.
+- `GET /api/repo/key` and `GET /api/repo/signing` (no authentication), and
+  `signing` in `GET /api/repo/info`.
 - Docs: `docs/docs/Configuration/pacman-repo.md#signing-the-repository`, three
   rows in the environment page.
 - `scripts/test-signed-repo.sh`: pacman itself, in a container, against a
@@ -227,49 +223,66 @@ paths.
 
 `AURCACHE_SIGNING_KEY_FILE` points at a key the operator supplies (a Docker
 secret, a separate mount); the server only reads it, and refuses to start
-when it is missing. It may be armored or binary; the newest subkey bound for
-signing, neither revoked nor expired and with its secret in the file, signs,
-else the primary key if it signs — as GnuPG picks, so a key whose old subkey
-expired signs with its new one, and a key exported with
-`gpg --export-secret-subkeys` (a stub where the primary's secret was) signs
-with its subkey. The choice is made again for every signature, so a subkey
-that expires while the server runs gives way to the next; the server warns
-from 30 days before the one it signs with expires -- at start, and once a
-day from the backfill job -- and refuses at start a key in which nothing
-signs. A day before the subkey that signs expires (`HANDOVER_SECS`), the
-choice moves to one that signs for longer, if there is one; the backfill job
-sleeps until then (`InstanceKey::signer_changes_in`), marks the repository
-unsigned and runs again, re-signing what the old subkey signed while clients
-still accept it. Clients need the new subkey, so adding or extending one means
-importing the key again on every client; the docs say so.
+when it is missing. It may be armored or binary.
 
-A subkey signs only under a primary key that is in force (`primary_status`):
+**One signing subkey, chosen once.** The server signs with the key's one
+current signing subkey -- bound for signing, neither revoked nor expired, its
+secret in the file -- else with the primary key if that signs. A key whose
+old subkeys have expired signs with its one current one, and a key exported
+with `gpg --export-secret-subkeys` (a stub where the primary's secret was)
+signs with its subkey. The choice is made when the key is loaded
+(`choose`), and refused there, saying which, for a key in which nothing
+signs, a key with **several** current signing subkeys -- the refusal says to
+export only the one to use (`gpg --export-secret-subkeys <subkey>!`) -- and a
+key whose signer stops signing within **`MIN_VALIDITY_DAYS` (30) days**. An
+expiry is then something an operator deals with at a restart, weeks ahead,
+rather than something clients find by refusing what was signed; a server that
+runs on past it stops signing (`InstanceKey::sign` refuses), so publishing
+fails rather than publish signatures clients reject. Thirty days is the
+notice the previous design gave before an expiry, and longer than most
+servers go between restarts.
+
+Moving from one signing subkey to the next while the server runs -- a
+handover a day before the old one expires, and the backfill signing
+everything again with the new one -- was built and taken out: it needs the
+clients to have imported the new subkey beforehand, which nothing tells them
+to do, and it carried a second backfill trigger, a daily notice and a choice
+made again at every signature. It belongs to a rotate-key operation (see
+[Rotation](#rotation)), which is not built.
+
+A subkey signs only under a primary key that is in force (`primary_expiry`):
 GnuPG, and pacman through it, takes a subkey's signature under an expired
 primary key for an expired one, and under a revoked primary for a revoked
 one, whatever the subkey's own binding says. So a key whose primary key has
-expired or is revoked is refused like one in which nothing signs, saying
-which, and a subkey stops signing when its primary key expires if that comes
-first -- in the 30-day notice, which then names the primary key, and in the
-handover, which finds nothing that signs for longer. **Finding:** a primary
-key that had expired years before, over a signing subkey that never expires,
-was taken for a current signer, the whole repository was signed again with
-it, and pacman refused all of it; `gpg --quick-gen-key` gives a primary key
-three years by default, so supplied keys reach this on their own. Tested with
-GnuPG keys: an expired primary, a revoked one, and one that expires before its
-subkey, whose signature GnuPG accepts now and reports `EXPKEYSIG` for once
-the primary has expired.
+expired or is revoked is refused, saying which, and a subkey's signing ends
+when its primary key expires if that comes first -- which the 30-day check
+counts, naming the primary key. The primary key's expiry is read from its
+newest self-signature that says one: a direct-key signature or a user ID
+certification (types 0x10–0x13 and 0x1F), never a revocation. **Finding:** a
+primary key that had expired years before, over a signing subkey that never
+expires, was taken for a current signer, the whole repository was signed
+again with it, and pacman refused all of it; `gpg --quick-gen-key` gives a
+primary key three years by default, so supplied keys reach this on their
+own. Tested with GnuPG keys: an expired primary, a revoked one, and one that
+expires before its subkey, whose signature GnuPG accepts now and reports
+`EXPKEYSIG` for once the primary has expired.
 
 Only the key's own signatures are checked (`self_signed`): a certification
 by someone else, which `gpg --export-secret-keys` includes, would fail rPGP's
 `verify_bindings` for want of its issuer.
 
 rPGP 0.21 refuses about one unprotected Ed25519 secret in 256 that GnuPG
-writes: it checks the secret's checksum over its own, canonical encoding of
-the MPI, and GnuPG writes a secret whose first byte is zero with a bit count
-of 256. Not reported upstream as of 0.21.1. `gnupg_checksums` reads such a
-key with the checksum rPGP computes, found by the packet's bytes rather than
-rPGP's error text, and only where GnuPG's own checksum is right, so a damaged
-key stays refused (fixtures and a GnuPG check in `aurcache-signing`).
+(2.4.9 included) writes: it checks the secret's checksum over its own,
+canonical encoding of the MPI, and GnuPG writes a secret whose first byte is
+zero with a bit count of 256. Not fixed upstream as of 0.21.1; reported as
+[rPGP #901](https://github.com/rpgp/rpgp/issues/901). rPGP's error is the one
+a damaged file gets, so the server refuses either at load with one message
+naming both, and what to try: a copy locked with a passphrase, whose checksum
+is over the decrypted bytes, which rPGP gets right, else a backup. Reading the key anyway, by rewriting its checksum
+before rPGP sees it, was built and taken out: about 130 lines of packet
+parsing for one key in 256, which a passphrase avoids. The tests that load
+keys GnuPG made run again with new keys when they hit one
+(`with_gnupg`).
 
 RSA keys sign through the `rsa` crate, which `pgp` brings and which has an
 unfixed timing side channel (RUSTSEC-2023-0071); the server warns about an
@@ -315,8 +328,7 @@ one. So from the first start with signing on, a client still on the
 documented `SigLevel = Optional TrustAll` refuses the repository
 (`key "…" is unknown`) until it trusts the key — `test-signed-repo.sh`
 asserts exactly that. Only `SigLevel = Never` clients are unaffected. The
-proposal assumed the opposite. The docs carry a warning, and
-`aurcli repo config --install` trusts the key before writing the stanza.
+proposal assumed the opposite. The docs carry a warning.
 pacman names the signing *subkey* in that error, not the fingerprint clients
 are told to trust; the docs say so.
 
@@ -351,16 +363,17 @@ grace period, as they are.
 
 ### Backfill
 
-**Built** (`aurcache_utils::signing::backfill`), signing everything published
-whose entry carries no `%PGPSIG%` by the key over the file as it is:
-published before signing, under another key or another of its subkeys, or
-with a signature that names the key but is not over the file
-(`Repository::unsigned`, which reads each file the key signed whole, on a
-blocking thread, outside the lock). A `Backfiller` runs it run after run and
-remembers, in memory, each entry it found signed -- by filename, checksum,
-signature and the subkey that signs -- so a file is read once per server
-process rather than once per run; the job keeps one for as long as the
-server runs.
+**Built** (`aurcache_utils::signing::Backfiller::run`), signing every entry
+that does not carry the key's signature: published before signing, or under
+another key (`Repository::unsigned`). An entry counts as signed when its
+`%PGPSIG%` names the component key that signs as its issuer and the `.sig`
+beside its file holds the same bytes -- without reading the file it signs:
+the repository only ever lists a signature it made over the file it
+describes. **Finding:** checking each signature over its file instead read
+the whole repository at every start, minutes of IO on a large one, with
+`backfilling` true all the while and clients told to keep signatures
+optional. What the cheaper check cannot see is a file changed behind the
+repository's back after it was signed; pacman refuses that one, as it should.
 
 Per platform:
 
@@ -378,25 +391,31 @@ Per platform:
    signed. `Update::resign` replaces an entry and moves only the signature;
    the package file never moves.
 
-Batches of 64 packages per update, which bounds how long the lock is held
-and how much a filesystem without hard links copies at once (a deviation
-from "one update per platform"). Then `Repository::sign_databases` signs, in
-place, any database whose signature does not verify — an empty platform, or
-one nothing needed re-signing on.
+Each update writes the platform's databases again, whatever it signs, so the
+batch grows with the repository: at least 64 packages, and at most 8 updates
+per platform (`batch_size`). A fixed batch of 64 rewrote `repo.files` once
+per 64 packages, which made the first backfill of a large repository
+quadratic. The floor bounds how much a filesystem without hard links copies
+at once in a small one. Then a platform whose databases do not carry the
+key's signature -- an empty one, or one nothing needed re-signing on -- gets
+an update that changes nothing and writes them again
+(`Update::rewrite_databases`), so the databases are only ever signed through
+the plan, as every update signs them.
 
 The job (`aurcache-scheduler`) runs it at start, and again after 1 minute,
 doubling to an hour, while it leaves anything unsigned; each run records
 `repo.signed` and `repo.signing_incomplete` events. `/repo/info` reports
 `backfilling: true` until a run finds nothing left (`Repository::mark_signed`).
 
-A file `<name>.db` lists that is not on disk -- what `Finalization::finish`
-leaves when a staged file was lost before its move -- cannot be signed, and
-no client can download it anyway. The backfill reports it once (a
-`repo.file_failed` event, action `sign`) and does not count it as unfinished,
-so it neither keeps the job retrying hourly nor keeps `backfilling` true and
-clients off `Required`. **Finding:** it used to do both, for good. Staging a
-missing file also said hard links had failed and it was copying instead; it
-says the file is not there now.
+A listed file that can never be signed does not keep it going: one not on
+disk -- what `Finalization::finish` leaves when a staged file was lost before
+its move -- one that cannot be read as a package, one that is not the file
+its entry describes, and an entry with no `%SHA256SUM%` to tell. Signing it
+again would fail the same way, and no client could install it either. The
+backfill reports each once (a `repo.file_failed` event, action `sign`) and
+does not count it as unfinished, so it neither keeps the job retrying hourly
+nor keeps `backfilling` true and clients off `Required`. **Finding:** a
+missing file used to do both, for good, and so would a damaged one.
 
 **Open question resolved:** the backfill runs automatically. Turning signing
 on already breaks untrusting clients at once (above), so holding signatures
@@ -455,7 +474,8 @@ A signature is only as useful as the client's way of knowing the key.
   `signing: Option<SigningInfo { fingerprint, backfilling }>`; `None`, or a
   server that predates it, means unsigned. **`GET /api/repo/signing`** (built)
   answers the same without authentication, for a client with no token yet.
-- **`aurcli repo config`** (built) prints `SigLevel = Required` and the two
+- **`aurcli repo config`** (not in this change; its own, the client trust
+  flow) prints `SigLevel = Required` and the two
   commands (`curl … | sudo pacman-key --add -`, `sudo pacman-key --lsign-key
   <fpr>`) when the instance signs and has finished backfilling, and keeps
   `Optional TrustAll` — still printing the commands — while it has not.
@@ -470,7 +490,7 @@ A signature is only as useful as the client's way of knowing the key.
   the same connection the token authenticates; the prompt is what makes
   `--lsign` a decision, and lsigning by the reported fingerprint means a
   served key that is not that one is never trusted.
-- **The web UI** (built): a *Repository signing* section on the Settings page
+- **The web UI** (not in this change, with the CLI's): a *Repository signing* section on the Settings page
   with the fingerprint, the backfill state, the commands and a link to the
   key. There is no repository page to put it on. `test-frontend.sh` runs its
   server with signing on, so the browser checks render the section in its
@@ -493,18 +513,27 @@ own change.
 
 ## Rotation
 
-Not built as an operation. What exists: replacing the key — a new
-`signing-key.asc`, or a supplied key — has the next start's backfill sign
-everything again with it, since a signature another key issued counts as
-unsigned. Every client has to trust the new key before that start, or it
-refuses the repository until it does; the docs say so. During that backfill,
-`repo.db` lists a mix of old and new signatures (batches), which only matters
-to a client that trusts one of the two keys.
+Not supported yet. The server signs with one subkey for as long as it runs,
+and refuses a key with several, or one about to expire (see [Where it
+lives](#where-it-lives)), so nothing moves from one signing key to another
+under it.
 
-Still to build: `aurcli repo rotate-key` (admin-only, with a warning), which
-generates the new key, certifies it with the old one so a client that looks
-can see the chain, and publishes the new fingerprint — ideally through a
-keyring package, which is what would make rotation smooth.
+Replacing the key is a restart with another one -- a new `signing-key.asc`,
+or a supplied key -- after which the backfill signs everything again with it,
+since a signature another key issued counts as unsigned. Clients refuse
+whatever a key they have not imported signed, so the safe order is: every
+client imports, and trusts, the new key first, *then* the server restarts
+with it. A new subkey under the same primary key needs the same: clients
+already trust the primary key, but have to import the key again to know the
+subkey. During that backfill `repo.db` lists a mix of old and new signatures
+(batches), which only matters to a client that trusts one of the two keys.
+
+Still to build, as a follow-up: `aurcli repo rotate-key` (admin-only, with a
+warning), which generates the new key or subkey, certifies it with the old
+one so a client that looks can see the chain, publishes it ahead of use, and
+hands signing over to it while the server runs -- with the backfill signing
+everything again before clients stop accepting the old one. Ideally through
+a keyring package, which is what would make rotation smooth.
 
 ---
 
@@ -516,26 +545,29 @@ Built:
   refused, the generated key's shape, creation and reload with mode 0600,
   passphrase locking and wrong passphrases, passphrase files, garbage key
   files left alone, `Debug` without secrets, GnuPG verification and trust
-  (above), GnuPG-exported keys, and GnuPG keys whose primary key has
-  expired, is revoked, or expires before its signing subkey.
+  (above), GnuPG-exported keys, GnuPG keys whose primary key has expired, is
+  revoked, or expires before its signing subkey, keys with two signing
+  subkeys or one that stops signing within 30 days, a key past its expiry
+  making no signature, and a key rPGP misreads refused with the way around
+  it, which a GnuPG check then follows.
 - `pacman-repo-utils`: `%PGPSIG%` round-trips from a sidecar through the
   databases and `listed_packages`; an unsigned package has none; signature
   links made and removed.
 - `aurcache-utils::repository`: a signed commit signs each package and both
   databases; an unsigned one writes no signature; a failed signed commit
   leaves every signature as it was; a replayed plan moves the database
-  signature in; `init` links or removes; databases signed in place once; a
-  worker's `.sig` replaced.
+  signature in; `init` links or removes; an update that only rewrites the
+  databases signs them; a package counts as signed only when its entry and
+  its `.sig` agree; a worker's `.sig` replaced.
 - `aurcache-utils::signing`: the backfill signs what was published unsigned
   and leaves the packages untouched, replaces another key's signatures, does
   not give a file replaced after its copy the copy's entry, and is a no-op
-  for an unsigned repository; a listed file missing from disk is reported
-  once and does not keep it from completing; a file one run found signed is
-  not read again by the next.
+  for an unsigned repository; signs databases nothing else would, once; a
+  listed file missing from disk, one that is not a package and one that is
+  not the file listed are reported once and do not keep it from completing;
+  the batch grows with the repository.
 - `aurcache-utils/tests/publish.rs`: a signing server publishes a build with
   its signature, in its entry and beside it, and a signed database.
-- `aurcache-cli`: the stanza and commands for signed, backfilling and
-  unsigned instances, and `--siglevel` still winning.
 - `scripts/test-signed-repo.sh`, with its fixture
   `aurcache-utils/tests/signed_repository.rs` (ignored by `cargo test`).
 
@@ -549,8 +581,12 @@ pacman makes of the server's output without workers.
 
 - **Workers verifying** the repository they install dependencies from
   ([Workers](#workers)).
-- **Rotation** as an operation, and certifying the new key with the old one
-  ([Rotation](#rotation)).
+- **The client trust flow**: `aurcli repo config` and the Settings page
+  telling a client how to trust the key ([Getting the key to
+  clients](#4-getting-the-key-to-clients)), its own change.
+- **Rotation** as an operation -- a rotate-key command, more than one signing
+  subkey and the handover between them, and certifying the new key with the
+  old one ([Rotation](#rotation)).
 - **A keyring package** (`aurcache-<name>-keyring`), so that rotations and,
   later, per-worker keys reach clients through `pacman -Syu`.
 - **A staged rollout**: a mode that creates and publishes the key without

@@ -76,17 +76,8 @@ port says nothing about the repository's, so against a server that moved it pass
 `--port`. `--offline` forces
 that fallback; `--port`, `--name` and `--siglevel` override the result outright.
 
-It also asks whether the repository is signed, which the server answers
-without a token too (`GET /api/repo/signing`). If it is, the stanza says
-`SigLevel = Required`, the commands to trust the key are printed with it, and
-`--install` first offers to run them: it shows the key's fingerprint and asks
-before adding the key to pacman's keyring and locally signing it (through
-`sudo` unless run as root). Answering no, or running without a terminal to ask
-on, leaves the keyring alone, prints the commands, and does not write the
-section either — pacman would refuse it, even with signatures optional, until
-the key is trusted. Run it again once the key is trusted, or pass `--siglevel`
-to write the section regardless. A section already in `pacman.conf` is left as
-it is, its `SigLevel` included: change that one yourself.
+For a signed repository, change the `SigLevel` it writes to `Required` once
+the key is trusted; see [Signing the repository](#signing-the-repository).
 
 `$arch` is pacman's own variable and is deliberately left unexpanded: one stanza
 serves every architecture the instance builds for.
@@ -124,37 +115,36 @@ directory without running the server, and a stale or swapped `repo.db`.
 ### Turning it on
 
 1. Set `AURCACHE_SIGN=true` on the server and restart it.
-2. On every client, trust the key: `aurcli repo config --install`, or by hand,
-   comparing the fingerprint with the one the server logs or the Settings page
-   shows:
+2. On every client, trust the key, comparing the fingerprint with the one
+   the server logs (and `GET /api/repo/signing` reports):
 
    ```bash
    curl -fsSL http://<server_ip>:8080/api/repo/key | sudo pacman-key --add -
    sudo pacman-key --lsign-key <fingerprint>
    ```
 
-3. Once the server has signed what it published before (below), set
-   `SigLevel = Required` on the clients.
+3. Once the server has signed what it published before (below:
+   `backfilling` is `false`), set `SigLevel = Required` on the clients.
 
 :::warning Trust the key on clients right away
 pacman checks every signature it finds, even under `SigLevel = Optional`, the
 stanza above included. From the moment the server signs, a client that does
 not trust the key refuses the repository with `key "<fingerprint>" is
 unknown`. That fingerprint is the signing subkey's, not the primary key's
-the server logs and the Settings page shows: adding and trusting the key as
+the server logs: adding and trusting the key as
 above takes care of both. Clients set to `SigLevel = Never` ignore signatures
 and are not affected.
 :::
 
 Packages published before signing was turned on — or signed by another key —
 are signed in the background after the server starts, a batch at a time,
-without holding up publishing. Until that has finished, the Settings page and
-`GET /api/repo/info` say so (`signing.backfilling`), and `aurcli repo config`
-keeps `SigLevel = Optional TrustAll`: a client requiring signatures would
-refuse the packages not yet signed. Whatever cannot be signed yet is retried
-later and reported in the **Logs** page. A package the repository lists but
-no longer has on disk is reported there once and does not hold the rest up:
-no client can download it either, and rebuilding it publishes it again.
+without holding up publishing. Until that has finished, `GET /api/repo/info`
+and `GET /api/repo/signing` say so (`backfilling`): a client requiring
+signatures would refuse the packages not yet signed. Whatever cannot be
+signed yet is retried later and reported in the **Logs** page. A package the
+repository lists but cannot sign at all — no longer on disk, or not the file
+its entry describes — is reported there once and does not hold the rest up:
+no client can install it either, and rebuilding it publishes it again.
 
 ### The key
 
@@ -164,33 +154,38 @@ the CA: losing it means a new key, which every client has to trust again.
 
 - `AURCACHE_SIGNING_KEY_FILE` points at a key you supply instead — a Docker
   secret, a separate mount. The server reads it and never writes it. It may be
-  armored or binary, and needs a primary key or subkey that signs; a key
-  exported with `gpg --export-secret-keys` works, certifications by others
-  included, and so does one exported with `gpg --export-secret-subkeys`, its
-  primary key kept offline. A server that does not sign says so when either
-  variable is set. Its newest valid signing subkey signs, as GnuPG picks, and
-  the server refuses to start with a key where nothing signs. Prefer an
-  Ed25519 key, as the server generates: an RSA key signs too, but through an
-  RSA implementation with a known timing side channel
+  armored or binary, and needs exactly one current signing subkey, or a
+  primary key that signs: a key exported with `gpg --export-secret-keys`
+  works, certifications by others included, and so does one exported with
+  `gpg --export-secret-subkeys`, its primary key kept offline. Expired
+  subkeys alongside are fine. A key with several current signing subkeys is
+  refused: export only the one to sign with (`gpg --export-secret-subkeys
+  <subkey fingerprint>!`, the `!` included). A server that does not sign
+  says so when either variable is set. Prefer an Ed25519 key, as the server
+  generates: an RSA key signs too, but through an RSA implementation with a
+  known timing side channel
   ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)),
   and the server warns about one.
-- **Subkeys expire, and so does the primary key.** A signing subkey stops
-  signing when it expires or when its primary key does, whichever comes
-  first: pacman takes every signature under an expired primary key for an
-  expired one, the subkeys' included, and `gpg --quick-gen-key` gives a
-  primary key three years by default. The server refuses to start with a key
-  whose primary key has expired or is revoked. From 30 days before the
-  signing subkey stops signing, the server says so at start and once a day
-  after. A day before, the server moves on to the next valid signing subkey,
-  if the key has one that signs for longer, and signs everything again with
-  it; without one — and there is none when it is the primary key that
-  expires — nothing signs once it has, and publishing fails until the server
-  has a key that does. Adding a subkey or extending one or the primary key
-  (`gpg --quick-set-expire`) changes the public key: give the server the new
-  key file and restart it, and have every client import the key again before
-  the old expiry (`curl -fsSL …/api/repo/key | sudo pacman-key --add -`) —
-  pacman checks a signature against the key as it imported it, and refuses
-  one by a subkey it has never seen.
+- **Expiry.** A signing subkey stops signing when it expires or when its
+  primary key does, whichever comes first: pacman takes every signature
+  under an expired primary key for an expired one, the subkeys' included,
+  and `gpg --quick-gen-key` gives a primary key three years by default. The
+  server refuses to start with a key that stops signing within **30 days**,
+  or whose primary key has expired or is revoked, and says when its key stops
+  signing at every start. A server that runs on past that stops signing, and
+  publishing fails until it has a key that signs. Extending the subkey or the
+  primary key (`gpg --quick-set-expire`) changes the public key: have every
+  client import the key again *before* the old expiry
+  (`curl -fsSL …/api/repo/key | sudo pacman-key --add -`), then give the
+  server the new key file and restart it — pacman checks a signature against
+  the key as it imported it.
+- Some unprotected Ed25519 keys GnuPG exports — about one in 256 — are
+  refused with a message saying the library the server reads keys with
+  refuses their checksum ([rPGP #901](https://github.com/rpgp/rpgp/issues/901)).
+  A damaged key file is refused with the same message. Lock the key with a
+  passphrase (`gpg --passwd <fingerprint>`), export it again and give the
+  server the passphrase (below): the locked copy is read. If it is refused
+  too, the file is damaged: restore the key from a backup.
 - `AURCACHE_SIGNING_KEY_PASSPHRASE_FILE` names a file holding a passphrase:
   a key the server creates is locked with it, and a supplied one unlocked
   with it. It protects a copy of the key file — a backup, a volume snapshot —
@@ -205,10 +200,14 @@ the CA: losing it means a new key, which every client has to trust again.
   `curl -fsSL …/api/repo/key | gpg --import` then
   `gpg --keyserver keyserver.ubuntu.com --send-keys <fingerprint>`.
 
-Replacing the key — a new file, or a supplied key in place of the generated
-one — has the server sign everything again with the new key at its next start.
-Every client has to trust the new key before then, or it refuses the
-repository until it does.
+Rotating the key while the server runs is not supported yet. Replacing it — a
+new file, or a supplied key in place of the generated one — has the server sign
+everything again with the new key at its next start, and a client refuses
+whatever is signed by a key it has not imported. So replace a key in this
+order: first import and trust the new key on every client (`pacman-key --add`
+and `--lsign-key`, as above, with the new key's file and fingerprint), then
+restart the server with it. A new subkey under the same primary key needs the
+same import, though the primary key's trust carries over.
 
 Turning signing off removes the databases' signatures at the next start, since
 the databases are written unsigned from then on. Packages keep the signatures
