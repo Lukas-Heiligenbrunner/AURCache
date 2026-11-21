@@ -674,7 +674,7 @@ impl Repository {
                 sign_staged(&key, &staged)?;
             }
             pacman_repo_utils::describe_package(&staged)
-                .map_err(|error| anyhow::Error::new(NotAPackage(error)))
+                .map_err(|error| anyhow::Error::new(NotAPackage { error }))
         })
         .await?
     }
@@ -1283,11 +1283,14 @@ pub struct Unsigned {
 /// A file [`Repository::describe`] could not read as a package: not one, or
 /// damaged. Reading it again changes nothing.
 #[derive(Debug)]
-pub struct NotAPackage(anyhow::Error);
+pub struct NotAPackage {
+    /// Why reading it failed.
+    error: anyhow::Error,
+}
 
 impl std::fmt::Display for NotAPackage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#}", self.0)
+        write!(f, "{:#}", self.error)
     }
 }
 
