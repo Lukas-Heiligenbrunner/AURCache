@@ -984,11 +984,6 @@ async fn no_claim_while_the_cluster_refuses_a_build_pod() {
 
     rig.cluster.admit();
     assert!(rig.executor.ready_for_work(0).await);
-    // An answer that judged nothing does not stop the worker.
-    rig.cluster.refuse(Admission::Unjudged {
-        message: "a pod of that name exists".to_string(),
-    });
-    assert!(rig.executor.ready_for_work(0).await);
 }
 
 /// With `WORKER_KUBE_USER_NAMESPACES=true`, an API server that drops

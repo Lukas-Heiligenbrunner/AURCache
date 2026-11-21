@@ -122,10 +122,6 @@ pub struct Build<'a, U> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Readiness {
     Ready,
-    /// The cluster answered without saying whether it admits a build pod.
-    Unsure {
-        message: String,
-    },
     /// The cluster's API did not answer at all.
     Unreachable {
         message: String,
@@ -695,7 +691,6 @@ impl<C: Cluster> KubeExecutor<C> {
                 UserNamespace::NotAsked | UserNamespace::Kept => Readiness::Ready,
             },
             Admission::Refused { message } => Readiness::Refused { message },
-            Admission::Unjudged { message } => Readiness::Unsure { message },
             Admission::Unreached { message } => Readiness::Unreachable { message },
         }
     }
@@ -734,10 +729,6 @@ impl<C: Cluster> KubeExecutor<C> {
         }
         match found {
             Readiness::Ready => tracing::info!("Claiming builds again"),
-            Readiness::Unsure { message } => tracing::warn!(
-                "The cluster did not say whether it admits a build pod; claiming builds \
-                 anyway: {message}"
-            ),
             Readiness::Unreachable { message } => tracing::warn!(
                 "Not claiming builds while the cluster's API does not answer: {message}"
             ),
@@ -823,7 +814,7 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
         let cfg = self.cfg.current();
         let found = self.readiness(&cfg).await;
         self.note(&found);
-        matches!(found, Readiness::Ready | Readiness::Unsure { .. })
+        found == Readiness::Ready
     }
 
     fn describe_self(&self) -> String {
