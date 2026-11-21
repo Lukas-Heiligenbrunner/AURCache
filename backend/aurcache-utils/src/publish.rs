@@ -131,6 +131,15 @@ pub async fn publish_build(
             warn!("publication of build #{build_id} needs recovery: {e:#}");
             PublicationOutcome::Retry
         }
+        // The repository's key was replaced while the packages were being
+        // read; reading them again signs them with the key it has now.
+        Err(e)
+            if e.downcast_ref::<crate::repository::SignedWithReplacedKey>()
+                .is_some() =>
+        {
+            info!("publishing build #{build_id} again: {e:#}");
+            PublicationOutcome::Retry
+        }
         Err(e) => report_failure(db, activity, &build, named.as_ref(), &e).await,
     };
     if outcome == PublicationOutcome::Finished {

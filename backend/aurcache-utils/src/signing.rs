@@ -147,11 +147,15 @@ pub async fn backfill(db: &DatabaseConnection, repo: &Repository) -> anyhow::Res
             skipped: Vec::new(),
         });
     };
+    // An update committed before the key was replaced may still be
+    // finishing through its recorded plan: finished first, its packages are
+    // listed -- signed with the old key -- when the listings below are read.
+    repo.recover(db).await?;
     let mut signed = 0;
     let mut skipped = Vec::new();
     let mut problems = Vec::new();
     for platform in Platform::ALL {
-        let pass = backfill_platform(db, repo, key, platform).await?;
+        let pass = backfill_platform(db, repo, &key, platform).await?;
         signed += pass.signed;
         skipped.extend(pass.skipped);
         problems.extend(pass.problems);
@@ -454,6 +458,7 @@ mod tests {
         assert_eq!(backfill(&db, &repo).await.unwrap(), complete(2));
 
         let key = repo.key().unwrap();
+        let key = &*key;
         let db_archive = platform_file(tmp.path(), "repo.db.tar.gz");
         for listed in pacman_repo_utils::listed_packages(&db_archive).unwrap() {
             let path = platform_file(tmp.path(), &listed.filename);
@@ -483,6 +488,7 @@ mod tests {
         let repo = Repository::new(tmp.path()).with_key(InstanceKey::generate(None).unwrap());
         assert_eq!(backfill(&db, &repo).await.unwrap(), complete(1));
         let key = repo.key().unwrap();
+        let key = &*key;
         assert!(signed_beside(
             key,
             &platform_file(tmp.path(), &filename("foo"))
@@ -505,6 +511,7 @@ mod tests {
 
         let repo = Repository::new(tmp.path()).with_key(InstanceKey::generate(None).unwrap());
         let key = repo.key().unwrap();
+        let key = &*key;
         let listed = repo.listed(Platform::X86_64).await.unwrap();
         let Staging::Staged(copy) = stage(&repo, Platform::X86_64, &listed[0]).await.unwrap()
         else {
@@ -567,6 +574,7 @@ mod tests {
         expected.sort_by(|a, b| a.path.cmp(&b.path));
         assert_eq!(skipped, expected);
         let key = repo.key().unwrap();
+        let key = &*key;
         assert!(signed_beside(
             key,
             &platform_file(tmp.path(), &filename("baz"))
@@ -643,6 +651,7 @@ mod tests {
         repo.init().unwrap();
         assert_eq!(backfill(&db, &repo).await.unwrap(), complete(0));
         let key = repo.key().unwrap();
+        let key = &*key;
         for platform in Platform::ALL {
             assert!(repo.databases_signed(platform).await.unwrap(), "{platform}");
         }
@@ -698,6 +707,7 @@ mod tests {
             }
         );
         let key = repo.key().unwrap();
+        let key = &*key;
         assert!(signed_beside(
             key,
             &platform_file(tmp.path(), &filename("bar"))
