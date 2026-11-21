@@ -70,12 +70,29 @@ fn grant(
     Ok(ruleset.add_rule(PathBeneath::new(fd, access))?)
 }
 
-/// The entries of `dir`; none when it cannot be read.
+/// The entries of `dir` that are not symlinks; none when it cannot be read.
+///
+/// A symlink is left out because granting it grants its target: [`grant`]
+/// opens the path, which follows the link, and the rule covers everything
+/// beneath wherever it points. In a Kubernetes secret, `key -> ..data/key` and
+/// `..data -> ..<timestamp>`, granting `..data` would grant the secret kept
+/// private as `key`; `/var/run -> /run` would do the same for a systemd
+/// credential.
+///
+/// The walk reaches a link's target at its real path and grants it there,
+/// unless it is private, and Landlock checks the resolved file, so reading
+/// through a link works wherever its target is granted. That holds for the
+/// private paths too only when they are given by their real paths as well,
+/// which is the caller's to do.
 fn list_dir(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    entries.flatten().map(|e| e.path()).collect()
+    entries
+        .flatten()
+        .filter(|e| !e.file_type().is_ok_and(|t| t.is_symlink()))
+        .map(|e| e.path())
+        .collect()
 }
 
 /// Expand exclusions into the positive read grants Landlock needs.
@@ -119,6 +136,84 @@ fn read_grants_excluding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh directory for one test, removed when dropped. By hand: the
+    /// sandbox has no dependencies, and a test helper is no reason to add one.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("aurcache-sandbox-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Whether any grant reaches `secret`, through any link.
+    fn reaches(grants: &[PathBuf], secret: &Path) -> Option<PathBuf> {
+        let secret = std::fs::canonicalize(secret).unwrap();
+        grants
+            .iter()
+            .find(|g| std::fs::canonicalize(g).is_ok_and(|real| secret.starts_with(real)))
+            .cloned()
+    }
+
+    /// Both the path as configured and its real path, as the server names
+    /// private paths.
+    fn private(path: &Path) -> Vec<PathBuf> {
+        vec![path.to_path_buf(), std::fs::canonicalize(path).unwrap()]
+    }
+
+    /// A Kubernetes secret volume is two links deep: `key -> ..data/key` and
+    /// `..data -> ..<timestamp>`. Granting `..data` grants the secret.
+    #[test]
+    fn a_kubernetes_secret_is_not_granted_through_its_links() {
+        let root = Scratch::new("k8s-secret");
+        let volume = root.path().join("secret");
+        let stamped = volume.join("..2026_11_17_10_00_00.123");
+        std::fs::create_dir_all(&stamped).unwrap();
+        std::fs::write(stamped.join("key"), "secret").unwrap();
+        std::fs::write(stamped.join("other"), "not secret").unwrap();
+        std::os::unix::fs::symlink("..2026_11_17_10_00_00.123", volume.join("..data")).unwrap();
+        std::os::unix::fs::symlink("..data/key", volume.join("key")).unwrap();
+        std::os::unix::fs::symlink("..data/other", volume.join("other")).unwrap();
+
+        let grants = read_grants_excluding(&private(&volume.join("key")), list_dir);
+        assert_eq!(reaches(&grants, &stamped.join("key")), None);
+        // What is beside it stays readable, at its real path.
+        assert!(reaches(&grants, &stamped.join("other")).is_some());
+    }
+
+    /// `/var/run -> /run`: a credential under `/run` named through `/var/run`
+    /// is not granted through the link.
+    #[test]
+    fn a_credential_under_a_linked_directory_is_not_granted_through_it() {
+        let root = Scratch::new("var-run");
+        let credentials = root.path().join("run/credentials/aurcache.service");
+        std::fs::create_dir_all(&credentials).unwrap();
+        std::fs::write(credentials.join("ssh_key"), "secret").unwrap();
+        std::fs::create_dir_all(root.path().join("var")).unwrap();
+        std::os::unix::fs::symlink("../run", root.path().join("var/run")).unwrap();
+
+        let configured = root
+            .path()
+            .join("var/run/credentials/aurcache.service/ssh_key");
+        let grants = read_grants_excluding(&private(&configured), list_dir);
+        assert_eq!(reaches(&grants, &credentials.join("ssh_key")), None);
+        assert!(!grants.contains(&root.path().join("var/run")));
+    }
 
     /// The whole point of the walk: a short list of secrets stays unreadable
     /// while everything else is granted, without enumerating the filesystem by

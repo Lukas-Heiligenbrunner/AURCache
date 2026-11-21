@@ -1,15 +1,16 @@
-//! Keeping the CA and the build logs in the repository until there is a
-//! better place for them.
+//! Keeping the CA, the build logs and the SSH key in the repository until
+//! there is a better place for them.
 //!
 //! The hybrid image is what a 0.5 deployment upgrades to by changing its image
 //! line, and the only directory such a deployment persists is the repository.
-//! So when the server's own directories for the worker CA and the build logs
-//! are not on a volume, and were not configured, it keeps them inside the
-//! repository, as `repo/.ca` and `repo/.build_logs`. Once its own are on a
-//! volume -- `/app` mounted, on this image or on the split one -- it finds them
-//! there at boot and moves them across, rather than starting with a CA no
-//! enrolled worker trusts and no logs. Both images behave alike, so moving
-//! from one to the other changes nothing but the embedded worker.
+//! So when the server's own directories for the worker CA, the build logs and
+//! the SSH key are not on a volume, and were not configured, it keeps them
+//! inside the repository, as `repo/.ca`, `repo/.build_logs` and `repo/.ssh`.
+//! Once its own are on a volume -- `/app` mounted, on this image or on the
+//! split one -- it finds them there at boot and moves them across, rather than
+//! starting with a CA no enrolled worker trusts, no logs, and an SSH key no
+//! remote knows. Both images behave alike, so moving from one to the other
+//! changes nothing but the embedded worker.
 //!
 //! A move is resumable at every step. Within one filesystem it is a single
 //! rename. Across two, the tree is copied into `.adopting` inside the target,
@@ -35,10 +36,11 @@ const COPIED: &str = ".adopted";
 pub enum HybridDir {
     Ca,
     BuildLogs,
+    Ssh,
 }
 
 impl HybridDir {
-    pub const ALL: [Self; 2] = [Self::Ca, Self::BuildLogs];
+    pub const ALL: [Self; 3] = [Self::Ca, Self::BuildLogs, Self::Ssh];
 
     /// Where the hybrid image keeps it.
     #[must_use]
@@ -46,6 +48,7 @@ impl HybridDir {
         Path::new(REPO_ROOT).join(match self {
             Self::Ca => ".ca",
             Self::BuildLogs => ".build_logs",
+            Self::Ssh => ".ssh",
         })
     }
 
@@ -54,6 +57,7 @@ impl HybridDir {
         match self {
             Self::Ca => super::configured_ca_dir(),
             Self::BuildLogs => super::configured_build_log_root(),
+            Self::Ssh => super::configured_ssh_dir(),
         }
     }
 
@@ -62,6 +66,7 @@ impl HybridDir {
         let var = match self {
             Self::Ca => crate::server_env::AURCACHE_CA_DIR,
             Self::BuildLogs => crate::server_env::AURCACHE_BUILD_LOG_PATH,
+            Self::Ssh => crate::server_env::AURCACHE_SSH_DIR,
         };
         var.get_os().is_some()
     }
@@ -72,6 +77,7 @@ impl HybridDir {
         match self {
             Self::Ca => "the worker CA",
             Self::BuildLogs => "the build logs",
+            Self::Ssh => "the SSH key",
         }
     }
 
@@ -79,9 +85,11 @@ impl HybridDir {
     pub(super) fn in_repository(self) -> &'static OnceLock<PathBuf> {
         static CA: OnceLock<PathBuf> = OnceLock::new();
         static BUILD_LOGS: OnceLock<PathBuf> = OnceLock::new();
+        static SSH: OnceLock<PathBuf> = OnceLock::new();
         match self {
             Self::Ca => &CA,
             Self::BuildLogs => &BUILD_LOGS,
+            Self::Ssh => &SSH,
         }
     }
 }

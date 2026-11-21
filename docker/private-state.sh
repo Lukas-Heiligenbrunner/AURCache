@@ -18,6 +18,7 @@ set -eu
 for dir in \
     ./db \
     "${AURCACHE_CA_DIR:-./data/ca}" \
+    "${AURCACHE_SSH_DIR:-./data/ssh}" \
     "${AURCACHE_BUILD_LOG_PATH:-./build_logs}" \
     "${AURCACHE_SOURCE_CACHE_PATH:-./source_cache}"; do
     mkdir -p "$dir"

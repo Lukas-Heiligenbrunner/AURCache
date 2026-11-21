@@ -1,0 +1,16 @@
+# Fixture for the server cloning a package's own source over SSH.
+#
+# The repository holding this file is served over SSH only, so the package can
+# be added only if the server cloned it with its own key. Nothing is fetched
+# during the build: the worker's credential is not what is under test here.
+pkgname=aurcache-ssh-source-test
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Served over SSH only, to prove the server clones package sources with its key"
+arch=('x86_64' 'aarch64' 'armv7h')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+
+package() {
+  install -Dm644 /dev/null "${pkgdir}/usr/share/aurcache-ssh-source-test/cloned-over-ssh"
+}

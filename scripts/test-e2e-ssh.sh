@@ -14,7 +14,7 @@ set -euo pipefail
 # server that authorises it — so this runs in CI wherever Docker does, with no
 # secret committed or configured.
 #
-# Four phases, in order:
+# Five phases, in order:
 #   1. unauthorised — the worker falls back to its own generated key, which the
 #      server does not authorise. The build MUST fail. Without this the whole
 #      test could pass for the wrong reason (sources cached, fetch skipped, an
@@ -24,11 +24,16 @@ set -euo pipefail
 #      package twice, proving both fetches really happened: the `source=` one
 #      on the worker, and the `prepare()` clone inside the chroot, through the
 #      agent's socket bound in there.
-#   3. pinned host — the same key, with `WORKER_SSH_KNOWN_HOSTS` naming the
+#   3. the server's own key — a package whose repository only SSH reaches. The
+#      add MUST be refused while the server's generated key is unknown to the
+#      git server, saying so, and succeed once `ssh key`'s output is authorised;
+#      the git server's host key is then trusted on first use, logged, and
+#      listed by `ssh hosts`.
+#   4. pinned host — the same key, with `WORKER_SSH_KNOWN_HOSTS` naming the
 #      server's host key. The build must succeed, both fetches checking the
 #      server against the staged copy: on the worker, and inside the chroot,
 #      where it is bound.
-#   4. unknown host — `WORKER_SSH_KNOWN_HOSTS` names another host only. The
+#   5. unknown host — `WORKER_SSH_KNOWN_HOSTS` names another host only. The
 #      build MUST fail, refused at host-key verification: the host-side fetch
 #      checks the server against the configured list instead of trusting it
 #      on first use.
@@ -166,7 +171,54 @@ if [ "$found" != "$SSH_TEST_MARKER"$'\n'"$SSH_TEST_MARKER" ]; then
     exit 1
 fi
 
-# ---- Phase 3: a configured known_hosts naming the server must build --------
+# ---- Phase 3: the server clones a package's own source with its key --------
+log "=== Phase: the server's own key (a package source over SSH) ==="
+readonly SSH_SOURCE="ssh://git@gitssh/srv/ssh-only/pkg.git"
+server_key="$(aurcache_cli ssh key | head -n 1)"
+if [[ $server_key != "ssh-ed25519 "* ]]; then
+    log "ERROR: \`ssh key\` printed no key (got: '${server_key:-<nothing>}')"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    server key: $server_key"
+
+if output=$(pkg_add "$SSH_SOURCE" --ref master 2>&1); then
+    log "ERROR: an SSH source was added before the server's key was authorised"
+    dump_logs_on_failure
+    exit 1
+fi
+if [[ $output != *"refused the server's SSH key"* ]]; then
+    printf '%s\n' "$output" | sed 's/^/    /'
+    log "ERROR: the refusal did not say the server's key was refused"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    refused while unauthorised, as required"
+
+printf '%s\n' "$server_key" | dc exec -T gitssh sh -c 'cat >> /home/git/.ssh/authorized_keys'
+if ! output=$(pkg_add "$SSH_SOURCE" --ref master \
+    --wait --wait-timeout "$BUILD_TIMEOUT" 2>&1); then
+    printf '%s\n' "$output" | sed 's/^/    /'
+    log "ERROR: the SSH source did not build once the server's key was authorised"
+    dump_logs_on_failure
+    exit 1
+fi
+# First use is in the activity log, whose entries the journal shows too, and
+# the key is listed with its fingerprint for someone to check.
+if ! dc logs aurcache 2>&1 | grep -q "trusted the SSH host key of gitssh on first contact"; then
+    log "ERROR: the server cloned without recording gitssh's host key"
+    dump_logs_on_failure
+    exit 1
+fi
+if ! hosts=$(aurcache_cli ssh hosts) || ! grep -q "^gitssh .* SHA256:" <<<"$hosts"; then
+    printf '%s\n' "${hosts:-}" | sed 's/^/    /'
+    log "ERROR: \`ssh hosts\` does not list gitssh's host key with its fingerprint"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    cloned with the server's key and built"
+
+# ---- Phase 4: a configured known_hosts naming the server must build --------
 run_phase "known_hosts names the server (expect success)" "/keys/id_ed25519" "/keys/known_hosts"
 if [ "$phase_result" != "success" ]; then
     log "ERROR: build was '$phase_result' with the server's host key in WORKER_SSH_KNOWN_HOSTS"
@@ -175,7 +227,7 @@ if [ "$phase_result" != "success" ]; then
 fi
 log "    build succeeded against the pinned host key"
 
-# ---- Phase 4: a host the configured known_hosts does not name is refused ----
+# ---- Phase 5: a host the configured known_hosts does not name is refused ----
 run_phase "known_hosts names another host (expect failure)" "/keys/id_ed25519" "/keys/known_hosts.other"
 if [ "$phase_result" != "failed" ]; then
     log "ERROR: build was '$phase_result' against a host WORKER_SSH_KNOWN_HOSTS does not name"

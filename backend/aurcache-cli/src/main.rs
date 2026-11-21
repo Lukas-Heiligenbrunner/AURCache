@@ -16,18 +16,18 @@ mod workers;
 use crate::builds::run_builds_command;
 use crate::cli::{
     ApiCommand, Cli, Command, ConfigCommand, OutputFormat, RawArgs, RepoCommand, RepoConfigArgs,
-    TokenCommand,
+    SshCommand, TokenCommand,
 };
 use crate::dump::{dump_command, restore_command};
 use crate::output::{
-    option_text, print_graph, print_health, print_raw_response, print_search_results, print_stats,
-    print_user_info, render,
+    format_ssh_key, format_trusted_hosts, option_text, print_graph, print_health,
+    print_raw_response, print_search_results, print_stats, print_user_info, render,
 };
 use crate::packages::run_packages_command;
 use crate::setup::run_setup_command;
 use crate::workers::run_worker_command;
 use anyhow::{Context, Result};
-use aurcache_client::{AurCacheClient, Method};
+use aurcache_client::{AurCacheClient, Method, SshKey, TrustedHosts};
 use clap::{CommandFactory, Parser};
 use config::{
     ClientConfig, load_config, resolve_runtime_config, save_config, set_token, set_url,
@@ -92,6 +92,12 @@ async fn run(client: &AurCacheClient, format: OutputFormat, command: ApiCommand)
         ApiCommand::Health => run_health(client, format).await,
         ApiCommand::Doctor => doctor::run_doctor(client, format).await,
         ApiCommand::UserInfo => render_user_info(client, format).await,
+        ApiCommand::Ssh {
+            command: SshCommand::Key,
+        } => render_ssh_key(client, format).await,
+        ApiCommand::Ssh {
+            command: SshCommand::Hosts,
+        } => render_ssh_hosts(client, format).await,
         ApiCommand::Stats => render_stats(client, format).await,
         ApiCommand::Graph => render_graph(client, format).await,
         ApiCommand::Search { query } => render_search_results(client, format, &query).await,
@@ -204,6 +210,36 @@ async fn run_health(client: &AurCacheClient, format: OutputFormat) -> Result<()>
 async fn render_user_info(client: &AurCacheClient, format: OutputFormat) -> Result<()> {
     let user = client.user_info().await?;
     render(format, &user, print_user_info)
+}
+
+/// The server's SSH key; a failure when it is not usable, so a script
+/// notices.
+async fn render_ssh_key(client: &AurCacheClient, format: OutputFormat) -> Result<()> {
+    let info = client.ssh_info().await?;
+    render(format, &info.key, |key| {
+        println!("{}", format_ssh_key(key, info.host_keys));
+    })?;
+    match &info.key {
+        SshKey::Ready { .. } => Ok(()),
+        SshKey::Unavailable { reason } => {
+            anyhow::bail!("the server's SSH key is not usable: {reason}")
+        }
+    }
+}
+
+/// The host keys the server trusts; a failure when it cannot read them, so
+/// a script notices.
+async fn render_ssh_hosts(client: &AurCacheClient, format: OutputFormat) -> Result<()> {
+    let info = client.ssh_info().await?;
+    render(format, &info.trusted_hosts, |hosts| {
+        println!("{}", format_trusted_hosts(hosts, info.host_keys));
+    })?;
+    match &info.trusted_hosts {
+        TrustedHosts::Listed { .. } => Ok(()),
+        TrustedHosts::Unreadable { reason } => {
+            anyhow::bail!("the server cannot read its trusted host keys: {reason}")
+        }
+    }
 }
 
 async fn render_stats(client: &AurCacheClient, format: OutputFormat) -> Result<()> {

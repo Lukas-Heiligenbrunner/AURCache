@@ -284,9 +284,11 @@ COPY --chmod=0755 docker/private-state.sh /usr/local/bin/aurcache-private-state
 #   /app/repo/.ca          the internal CA that signs every worker's
 #                          certificate. Losing it orphans every worker that
 #                          ever enrolled.
+#   /app/repo/.ssh         the SSH key private package sources are cloned
+#                          with. Losing it means a new key to add everywhere.
 #
 # Mount /app, as the split server's compose files do, and the next start moves
-# both to where that server keeps them; AURCACHE_CA_DIR and
+# them to where that server keeps them; AURCACHE_CA_DIR, AURCACHE_SSH_DIR and
 # AURCACHE_BUILD_LOG_PATH choose other places. That is the server binary's own
 # behaviour (aurcache_common::fs::adopt_hybrid_dirs), not this image's, so
 # swapping this image for the split server changes nothing but the embedded

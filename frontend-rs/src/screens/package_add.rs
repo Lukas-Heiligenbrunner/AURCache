@@ -21,7 +21,9 @@
 use crate::listing::ViewParams;
 use crate::platforms::{self, PlatformChecklist};
 use crate::routes::Route;
-use aurcache_client::{GitSourceSpec, SearchResult, SourceData, looks_like_git_url, source_label};
+use aurcache_client::{
+    GitSourceSpec, SearchResult, SourceData, looks_like_git_url, source_label, ssh_remote,
+};
 use dioxus::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
@@ -632,6 +634,10 @@ fn AddPackageDialog(q: String) -> Element {
                             onclick: move |_| queue_git_remote(),
                             "Add to list"
                         }
+                    }
+                    // Trimmed as `git_source` trims it: the URL the server gets.
+                    if ssh_remote(entry().trim()).is_some() {
+                        crate::screens::ssh_key::SshSourceHint {}
                     }
                 } else {
                     SearchResults {

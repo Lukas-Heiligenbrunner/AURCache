@@ -34,7 +34,7 @@ pub fn pre_startup_tasks(version: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Decide where the CA and the build logs live: see
+/// Decide where the CA, the build logs and the SSH key live: see
 /// [`aurcache_common::fs::adopt_hybrid_dirs`].
 ///
 /// Before the database: the 0.5 conversion writes build logs, and they belong
@@ -131,6 +131,7 @@ fn warn_about_ephemeral_data() {
         PathBuf::from(REPO_ROOT),
         aurcache_common::fs::build_log_root(),
         aurcache_common::fs::ca_dir(),
+        aurcache_common::fs::ssh_dir(),
     ]
     .into_iter()
     .filter(|dir| !persisted(dir))

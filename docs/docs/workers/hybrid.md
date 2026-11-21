@@ -211,9 +211,10 @@ only root can read:
 |---|---|
 | `/app/repo/.build_logs` | Build logs, including those your old version kept in its database |
 | `/app/repo/.ca` | The internal CA that signs every worker's certificate |
+| `/app/repo/.ssh` | The SSH key [SSH package sources](../Configuration/ssh-sources.md) are cloned with, once one is generated |
 
 That is only while nothing better is mounted. Mount `/app`, or set
-`AURCACHE_CA_DIR` or `AURCACHE_BUILD_LOG_PATH` to a directory on a volume, and
+`AURCACHE_CA_DIR`, `AURCACHE_SSH_DIR` or `AURCACHE_BUILD_LOG_PATH` to a directory on a volume, and
 the next start moves them there; see [Migrating](#migrating). The split server
 image behaves the same way.
 

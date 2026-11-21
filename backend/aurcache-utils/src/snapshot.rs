@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 use crate::git::EmptyRepository;
 use crate::patch::SourcePatch;
 use crate::pkgbuild::fix_source_urls;
+use crate::ssh::SshAccess;
 
 /// Base URL for AUR git repositories. AUR packages are unified with git
 /// sources: `https://aur.archlinux.org/{pkgbase}.git`, ref `HEAD`, no
@@ -174,6 +175,9 @@ pub struct SnapshotStore {
     /// instead of the next restart. Tests construct a store without a database
     /// and get the default.
     db: Option<DatabaseConnection>,
+    /// The key and host keys a source over SSH is cloned with. A store built
+    /// without them refuses SSH sources, saying so.
+    ssh: Arc<SshAccess>,
 }
 
 impl Default for SnapshotStore {
@@ -205,6 +209,9 @@ impl SnapshotStore {
             checkout_root,
             aur_git_base_url: aur_git_base_url.into(),
             db: None,
+            ssh: Arc::new(SshAccess::unavailable(
+                "this store was built without the server's SSH configuration",
+            )),
         }
     }
 
@@ -213,6 +220,19 @@ impl SnapshotStore {
     pub fn with_db(mut self, db: DatabaseConnection) -> Self {
         self.db = Some(db);
         self
+    }
+
+    /// Attach the SSH key and host keys sources over SSH are cloned with.
+    #[must_use]
+    pub fn with_ssh(mut self, ssh: Arc<SshAccess>) -> Self {
+        self.ssh = ssh;
+        self
+    }
+
+    /// The SSH key and host keys this store clones with.
+    #[must_use]
+    pub fn ssh(&self) -> &SshAccess {
+        &self.ssh
     }
 
     /// Whether a PKGBUILD parsed now may use the network.
@@ -687,7 +707,8 @@ impl SnapshotStore {
         let dir_name = sanitize_cache_key(&source_data.cache_key());
         let lock = self.checkout_lock(&dir_name);
         let _checkout = lock.lock().await;
-        checkout_and_parse(coordinates, &self.checkout_root.join(dir_name), network)
+        let path = self.checkout_root.join(dir_name);
+        checkout_and_parse(coordinates, &path, network, Arc::clone(&self.ssh))
             .await
             .map_err(|e| explain_source_failure(source_data, e))
     }
@@ -798,8 +819,9 @@ async fn checkout_and_parse(
     coordinates: GitCoordinates,
     path: &Path,
     network: bool,
+    ssh: Arc<SshAccess>,
 ) -> anyhow::Result<CheckedOutSource> {
-    use crate::git::checkout_or_fetch_repo_ref;
+    use crate::git::{Access, checkout_or_fetch_repo_ref};
     use crate::pkgbuild::parse_pkgbuild;
 
     let GitCoordinates {
@@ -812,7 +834,7 @@ async fn checkout_and_parse(
     // git2 types are not `Send`, so the checkout itself must run fully
     // within the blocking closure.
     let (commit, package_dir) = tokio::task::spawn_blocking(move || {
-        let commit = checkout_or_fetch_repo_ref(&repo_url, &git_ref, &path)?;
+        let commit = checkout_or_fetch_repo_ref(&repo_url, &git_ref, &path, Access::Server(&ssh))?;
         let package_dir = if subfolder.is_empty() {
             path
         } else {

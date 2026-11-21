@@ -168,6 +168,7 @@ fn SettingsSections(
         }
 
         ApiAccessSection {}
+        crate::screens::ssh_key::SshKeySection {}
         crate::screens::backup::BackupSection {}
         }
     }
