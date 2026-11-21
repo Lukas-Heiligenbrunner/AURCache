@@ -219,7 +219,7 @@ elsewhere with `AURCACHE_SIGNING_KEY_FILE`.
   root. A key locked with a passphrase stays locked in the dump, and the
   passphrase is never in it; restoring then needs the same passphrase
   configured. A dump without secrets carries nothing about signing. A key a
-  restore replaces or removes is kept beside it as
+  restore replaces is kept beside it as
   `signing-key.asc.replaced-<fingerprint>`.
 - **Without [sign-in](./authentication.md), anyone who can reach the API can
   take the key.** An instance with no OAuth configured treats every caller as

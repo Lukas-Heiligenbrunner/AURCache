@@ -252,7 +252,7 @@ defect this frontend has had was of that kind.
   platform directory any other way. The key is a file beside the CA, never a row; like the CA it is in
   a dump only with secrets, read from its file as stored. A restore plans its secrets before it is
   accepted (`restore::plan_secrets`, in the route; refused whole, `400`, otherwise), staging every new
-  file and a copy of the key file it replaces or removes (`fs::stage_replaced`) beside what it replaces;
+  file and a copy of the key file it replaces (`fs::stage_replaced`) beside what it replaces;
   after the commit `apply_secrets` only renames. Its answer says what it does to each secret
   (`RestoreAccepted::secrets`); its entries stay packages, so a released CLI still reads them.
   `Repository::replace_key` writes another key's file and swaps it in together, under the repository
