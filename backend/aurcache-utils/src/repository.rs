@@ -126,6 +126,9 @@ struct Changes {
     /// in, while the files themselves stay where they are.
     resign: Vec<Addition>,
     retire: Vec<Retirement>,
+    /// Platforms whose databases are written again even with nothing else
+    /// to change on them, which signs them.
+    rewrite: Vec<Platform>,
 }
 
 /// A published file an update takes out of the databases.
@@ -175,6 +178,7 @@ impl Changes {
             .staged()
             .map(|a| a.platform)
             .chain(self.retire.iter().map(|r| r.platform))
+            .chain(self.rewrite.iter().copied())
             .collect();
         platforms.sort_by_key(Platform::as_str);
         platforms.dedup();
@@ -303,6 +307,15 @@ impl Update<'_> {
     /// copy was made from.
     pub fn resign(&mut self, platform: Platform, staged: PathBuf, entry: PackageEntry) {
         self.changes.resign(platform, staged, entry);
+    }
+
+    /// Write `platform`'s databases again, as they are -- signed, when the
+    /// repository signs -- whatever else this update changes there.
+    ///
+    /// For databases written before the repository signed, or signed by
+    /// another key: a database is only ever signed as an update writes it.
+    pub fn rewrite_databases(&mut self, platform: Platform) {
+        self.changes.rewrite.push(platform);
     }
 
     /// What `platform`'s `repo.db` lists, read under the lock: nothing can
@@ -550,16 +563,6 @@ impl Repository {
         }
     }
 
-    /// Record that what the repository lists may not all carry the key's
-    /// signature any more -- the component key that signs changed, and what
-    /// the old one signed waits to be signed again -- until a backfill finds
-    /// nothing left.
-    pub fn mark_unsigned(&self) {
-        if let Some(signing) = &self.signing {
-            signing.complete.store(false, Ordering::Release);
-        }
-    }
-
     /// Create the databases of every platform that has none yet, and the
     /// links pacman fetches their signatures through -- or, for a repository
     /// that does not sign, remove any signatures of its databases left from
@@ -663,6 +666,7 @@ impl Repository {
     /// The signature is written beside the staged file, replacing whatever
     /// was there (a worker's upload of that name included), so the entry
     /// carries it as `%PGPSIG%` and the update moves it in with the package.
+    /// A file that cannot be read as a package fails with [`NotAPackage`].
     pub async fn describe(&self, staged: PathBuf) -> anyhow::Result<PackageEntry> {
         let key = self.key_handle();
         tokio::task::spawn_blocking(move || {
@@ -670,6 +674,7 @@ impl Repository {
                 sign_staged(&key, &staged)?;
             }
             pacman_repo_utils::describe_package(&staged)
+                .map_err(|error| anyhow::Error::new(NotAPackage(error)))
         })
         .await?
     }
@@ -689,33 +694,44 @@ impl Repository {
         .await?
     }
 
-    /// The entries `platform`'s database lists whose file does not carry the
-    /// key's signature over what it is now: unsigned, signed by another key
-    /// or another of its subkeys, or with a `%PGPSIG%` that names the key but
-    /// is not over the file -- and, apart, those whose file is not there at
-    /// all. Each file the key signed is read whole to tell,
-    /// on a blocking thread and without the lock: a change may land
-    /// meanwhile, which [`Update::resign`]'s caller checks.
+    /// The entries `platform`'s database lists that do not carry the key's
+    /// signature -- unsigned, signed by another key, or with a `.sig` beside
+    /// the file that is not the `%PGPSIG%` of its entry -- and, apart, those
+    /// whose file is not there at all.
     ///
-    /// An entry `verified` holds is not read again; `verified` is left
-    /// holding the entries listed now that carry the signature, for the next
-    /// call.
-    pub async fn unsigned(
-        &self,
-        platform: Platform,
-        verified: &mut Verified,
-    ) -> anyhow::Result<Unsigned> {
+    /// Told by the issuer each signature names, without reading the files
+    /// it signs: the repository only ever lists a signature it made over the
+    /// file it describes. Read on a blocking thread and without the lock: a
+    /// change may land meanwhile, which [`Update::resign`]'s caller checks.
+    pub async fn unsigned(&self, platform: Platform) -> anyhow::Result<Unsigned> {
         let Some(key) = self.key_handle() else {
             return Ok(Unsigned::default());
         };
         let listed = self.listed(platform).await?;
         let dir = Self::platform_dir(&self.root, platform);
-        let known = verified.entries.remove(&platform).unwrap_or_default();
-        let Checked { unsigned, signed } =
-            tokio::task::spawn_blocking(move || check_signatures(&key, &dir, listed, &known))
-                .await?;
-        verified.entries.insert(platform, signed);
-        Ok(unsigned)
+        tokio::task::spawn_blocking(move || sort_signatures(&key, &dir, listed)).await?
+    }
+
+    /// Whether both of `platform`'s databases carry a signature beside them
+    /// that the key made, told as [`Self::unsigned`] tells a package's. A
+    /// repository that does not sign has nothing to sign them with.
+    pub async fn databases_signed(&self, platform: Platform) -> anyhow::Result<bool> {
+        let Some(key) = self.key_handle() else {
+            return Ok(true);
+        };
+        let dir = Self::platform_dir(&self.root, platform);
+        let name = self.name.clone();
+        tokio::task::spawn_blocking(move || {
+            for archive in ["db", "files"] {
+                let signature = dir.join(format!("{name}.{archive}.tar.gz.sig"));
+                match read_if_there(&signature)? {
+                    Some(signature) if key.issued(&signature) => {}
+                    _ => return Ok(false),
+                }
+            }
+            Ok(true)
+        })
+        .await?
     }
 
     /// Where a backfill stages copies of `platform`'s published files, to sign
@@ -753,36 +769,6 @@ impl Repository {
         })
         .await??;
         Ok(result)
-    }
-
-    /// Sign every platform's databases that do not carry a signature of the
-    /// key over what they are now, in place.
-    ///
-    /// For databases no update has rewritten since signing began. A
-    /// signature written here is for the databases exactly as they are,
-    /// read under the lock, and replaces any other at once, so a client sees
-    /// the old signature or the new one, each beside the databases it signs.
-    /// Nothing is recorded for recovery: an interruption leaves what was
-    /// there, and the next call does it again.
-    pub async fn sign_databases(&self, db: &DatabaseConnection) -> anyhow::Result<()> {
-        let Some(key) = self.key_handle() else {
-            return Ok(());
-        };
-        let lock = self.lock().await;
-        self.recover_locked(db, Arc::clone(&lock)).await?;
-        let root = self.root.clone();
-        let name = self.name.clone();
-        tokio::task::spawn_blocking(move || {
-            let _lock = lock;
-            for platform in Platform::ALL {
-                let dir = Self::platform_dir(&root, platform);
-                for archive in ["db", "files"] {
-                    sign_in_place(&key, &dir.join(format!("{name}.{archive}.tar.gz")))?;
-                }
-            }
-            Ok(())
-        })
-        .await?
     }
 
     /// Start changing the repository.
@@ -901,6 +887,12 @@ impl Repository {
         self.retired
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Where the file `filename` published on `platform` is.
+    #[must_use]
+    pub fn platform_file(&self, platform: Platform, filename: &str) -> PathBuf {
+        Self::platform_dir(&self.root, platform).join(filename)
     }
 
     fn platform_dir(root: &Path, platform: Platform) -> PathBuf {
@@ -1281,85 +1273,53 @@ pub struct Unsigned {
     pub missing: Vec<PathBuf>,
 }
 
-/// Database entries found carrying the key's signature over their file,
-/// which [`Repository::unsigned`] does not read again: kept in memory from
-/// one call to the next by whoever makes them.
-#[derive(Debug, Default)]
-pub struct Verified {
-    entries: HashMap<Platform, HashSet<VerifiedEntry>>,
-}
+/// A file [`Repository::describe`] could not read as a package: not one, or
+/// damaged. Reading it again changes nothing.
+#[derive(Debug)]
+pub struct NotAPackage(anyhow::Error);
 
-/// An entry found carrying the key's signature over its file, as it was
-/// then: a different checksum, signature or signer is a different entry,
-/// read again.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct VerifiedEntry {
-    filename: String,
-    sha256sum: String,
-    signature: Vec<u8>,
-    /// The fingerprint of the component key that signed at the time.
-    signer: String,
-}
-
-impl VerifiedEntry {
-    /// What `entry` is remembered as once found signed while `signer`
-    /// signs; `None` for an entry without the checksum or signature that
-    /// tells it from the next one under the same name.
-    fn of(entry: &ListedPackage, signer: &str) -> Option<Self> {
-        Some(Self {
-            filename: entry.filename.clone(),
-            sha256sum: entry.sha256sum.clone()?,
-            signature: entry.signature.clone()?,
-            signer: signer.to_string(),
-        })
+impl std::fmt::Display for NotAPackage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
     }
 }
 
-/// What [`check_signatures`] found.
-struct Checked {
-    unsigned: Unsigned,
-    /// The entries listed that carry the key's signature over their file.
-    signed: HashSet<VerifiedEntry>,
-}
+impl std::error::Error for NotAPackage {}
 
 /// Sort `listed`, the entries of the database in `dir`, by whether each
-/// carries `key`'s signature over its file, reading only those `known` does
-/// not already hold.
-fn check_signatures(
+/// carries `key`'s signature, beside its file and in the entry alike
+/// ([`Repository::unsigned`]).
+fn sort_signatures(
     key: &InstanceKey,
     dir: &Path,
     listed: Vec<ListedPackage>,
-    known: &HashSet<VerifiedEntry>,
-) -> Checked {
-    let signer = key.signer_fingerprint();
-    let mut checked = Checked {
-        unsigned: Unsigned::default(),
-        signed: HashSet::new(),
-    };
+) -> anyhow::Result<Unsigned> {
+    let mut unsigned = Unsigned::default();
     for entry in listed {
-        let remembered = signer
-            .as_deref()
-            .and_then(|signer| VerifiedEntry::of(&entry, signer));
-        if let Some(remembered) = remembered.as_ref().filter(|r| known.contains(r)) {
-            checked.signed.insert(remembered.clone());
-            continue;
-        }
         let path = dir.join(&entry.filename);
         if is_missing(&path) {
-            checked.unsigned.missing.push(path);
+            unsigned.missing.push(path);
             continue;
         }
+        let beside = read_if_there(&with_suffix(&path, ".sig"))?;
         let signed = entry
             .signature
             .as_deref()
-            .is_some_and(|signature| key.issued(signature) && key.verifies_file(signature, &path));
+            .is_some_and(|signature| key.issued(signature) && beside.as_deref() == Some(signature));
         if !signed {
-            checked.unsigned.to_sign.push(entry);
-        } else if let Some(remembered) = remembered {
-            checked.signed.insert(remembered);
+            unsigned.to_sign.push(entry);
         }
     }
-    checked
+    Ok(unsigned)
+}
+
+/// What is in the file at `path`, or `None` when there is none.
+fn read_if_there(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(anyhow::Error::new(error).context(format!("reading {}", path.display()))),
+    }
 }
 
 /// Whether nothing at all is at `path`. A file that is there but cannot be
@@ -1439,27 +1399,6 @@ fn write_signature(path: &Path, signature: &[u8]) -> anyhow::Result<()> {
     sync(&partial)?;
     std::fs::rename(&partial, path)?;
     sync(path)
-}
-
-/// Sign `archive` with `key` beside it, unless the signature there already
-/// is the key's over what the archive is now. An archive that is not there
-/// has nothing to sign.
-fn sign_in_place(key: &InstanceKey, archive: &Path) -> anyhow::Result<()> {
-    let content = match std::fs::read(archive) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let path = with_suffix(archive, ".sig");
-    let current = match std::fs::read(&path) {
-        Ok(signature) => Some(signature),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-    if current.is_some_and(|signature| key.verifies(&signature, &content)) {
-        return Ok(());
-    }
-    write_signature(&path, &key.sign(content.as_slice())?)
 }
 
 #[cfg(test)]
@@ -2323,8 +2262,14 @@ mod tests {
                 PathBuf::from(format!("custom_name.{suffix}.tar.gz.sig"))
             );
         }
-        repo.sign_databases(&db).await.unwrap();
+        let mut update = repo.begin(&db).await.unwrap();
+        update.rewrite_databases(Platform::X86_64);
+        update
+            .commit(&db, |_| Box::pin(async { Ok(()) }))
+            .await
+            .unwrap();
         assert!(signed(&repo, &dir.join("custom_name.db.tar.gz")));
+        assert!(repo.databases_signed(Platform::X86_64).await.unwrap());
 
         let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
         apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
@@ -2333,7 +2278,7 @@ mod tests {
         }
         assert!(signed(&repo, &platform_file(&repo, "foo", "1.0-1")));
         assert!(
-            repo.unsigned(Platform::X86_64, &mut Verified::default())
+            repo.unsigned(Platform::X86_64)
                 .await
                 .unwrap()
                 .to_sign
@@ -2372,10 +2317,8 @@ mod tests {
         let key = || InstanceKey::load(&key_path, None).unwrap();
         let repo = Repository::new(tmp.path()).with_key(key());
         repo.init().unwrap();
-        let db = aurcache_db::testing::memory_db().await;
         let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
         apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
-        repo.sign_databases(&db).await.unwrap();
 
         let dir = tmp.path().join("x86_64");
         let moved = tmp.path().join("elsewhere");
@@ -2409,7 +2352,7 @@ mod tests {
         repo.init().unwrap();
         assert!(signed(&repo, &dir.join("custom_name.db.tar.gz")));
         assert!(
-            repo.unsigned(Platform::X86_64, &mut Verified::default())
+            repo.unsigned(Platform::X86_64)
                 .await
                 .unwrap()
                 .to_sign
@@ -2563,10 +2506,11 @@ mod tests {
         );
     }
 
-    /// Databases written before the repository signed are signed in place,
-    /// once: a signature that already verifies is left as it is.
+    /// Databases written before the repository signed are not taken for
+    /// signed, and an update that only writes them again signs them, leaving
+    /// what they list as it was.
     #[tokio::test]
-    async fn databases_are_signed_in_place_once() {
+    async fn rewriting_the_databases_signs_them() {
         let tmp = tempfile::tempdir().unwrap();
         let db = aurcache_db::testing::memory_db().await;
         let unsigned = Repository::new(tmp.path());
@@ -2576,19 +2520,54 @@ mod tests {
 
         let repo = signing_repo(tmp.path());
         repo.init().unwrap();
-        repo.sign_databases(&db).await.unwrap();
-        let signature = with_suffix(&archive(&repo, DB_ARCHIVE), ".sig");
+        assert!(!repo.databases_signed(Platform::X86_64).await.unwrap());
+        let mut update = repo.begin(&db).await.unwrap();
+        update.rewrite_databases(Platform::X86_64);
+        update
+            .commit(&db, |_| Box::pin(async { Ok(()) }))
+            .await
+            .unwrap();
         assert!(signed(&repo, &archive(&repo, DB_ARCHIVE)));
         assert!(signed(&repo, &archive(&repo, FILES_ARCHIVE)));
-        let first = std::fs::read(&signature).unwrap();
+        assert!(repo.databases_signed(Platform::X86_64).await.unwrap());
+        assert!(!repo.databases_signed(Platform::Aarch64).await.unwrap());
+        assert_eq!(listed(&repo), ["foo-1.0-1"]);
+        let entries = pacman_repo_utils::listed_packages(&archive(&repo, DB_ARCHIVE)).unwrap();
+        assert_eq!(
+            entries[0].signature, None,
+            "the package is not signed by this"
+        );
+        assert!(next_files_left(&repo).is_empty());
+    }
 
-        repo.sign_databases(&db).await.unwrap();
-        assert_eq!(std::fs::read(&signature).unwrap(), first);
+    /// An entry that carries the key's signature, and the same signature
+    /// beside its file, is signed; one whose `.sig` beside it is another, or
+    /// gone, is not.
+    #[tokio::test]
+    async fn a_package_is_signed_when_its_entry_and_its_sig_agree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = signing_repo(tmp.path());
+        let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+        apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
         assert!(
-            !std::fs::read_dir(repo.root().join("x86_64"))
+            repo.unsigned(Platform::X86_64)
+                .await
                 .unwrap()
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().ends_with(".partial"))
+                .to_sign
+                .is_empty()
+        );
+
+        let beside = with_suffix(&platform_file(&repo, "foo", "1.0-1"), ".sig");
+        let key = repo.key().unwrap();
+        std::fs::write(&beside, key.sign(&b"something else"[..]).unwrap()).unwrap();
+        assert_eq!(
+            repo.unsigned(Platform::X86_64).await.unwrap().to_sign.len(),
+            1
+        );
+        std::fs::remove_file(&beside).unwrap();
+        assert_eq!(
+            repo.unsigned(Platform::X86_64).await.unwrap().to_sign.len(),
+            1
         );
     }
 
