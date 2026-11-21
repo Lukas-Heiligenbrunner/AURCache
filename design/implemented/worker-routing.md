@@ -452,9 +452,14 @@ sudo's `PATH` finds the copy `makechrootpkg` runs, and directly when the
 worker already is the build user, where the worker's own `PATH` does. The
 sandbox answers from the checks a build makes, with that user's rights:
 `resolve-unix` only when this kernel's Landlock has the right and the policy
-file could be read, protects something, and protects that directory;
-otherwise `no-resolve-unix: ` and which of those failed, which the worker
-logs. Reading the policy as the build user is the point: a policy at
+file could be read, protects something, and protects that directory where it
+really is (a directory spelled beneath a protected one, through a symlink or
+`..`, may be anywhere); otherwise `no-resolve-unix: ` and which of those
+failed, which the worker logs. The worker creates the directory before it
+asks, and asks again before each build while it holds named keys: a policy
+edited or a sandbox replaced under it changes the answer, and a build whose
+package names a key then goes ahead without it, with the log saying why once
+per change. Reading the policy as the build user is the point: a policy at
 `0600 root` reads as missing to that user, and a check made with the
 worker's rights would pass while the sandbox saw no policy at all. The
 sandbox also refuses a build outright whenever its policy file exists but
@@ -474,7 +479,7 @@ agents running, the hostile fixture reaches both by their fixed paths when
 unconfined, is refused both (`EACCES`) when confined and offered none -- while
 another process is using one -- and, offered the default key, reaches its
 agent and is refused the other. With the policy at `0600 root`, the sandbox,
-asked as the build user, answers `no-resolve-unix: policy unreadable`, and a
+asked as the build user, answers `no-resolve-unix: bad policy`, and a
 build offered the default key is refused before any of its code runs.
 
 **What it guarantees.** A private key never leaves the worker, and builds only

@@ -103,20 +103,6 @@ async fn announce_build_credential(cfg: &Config) {
     }
 }
 
-/// Why builds cannot be kept from the agents outside their chroot on this
-/// machine, as a clause for the startup log; `None` when they can.
-fn gate_gap(gate: agent::HostSideGate) -> Option<String> {
-    match gate {
-        agent::HostSideGate::Enforced => None,
-        agent::HostSideGate::SandboxDeclines { why } => Some(format!(
-            "aurcache-sandbox, asked as the build user, says it would not: {why}"
-        )),
-        agent::HostSideGate::Unanswered { why } => Some(format!(
-            "aurcache-sandbox could not be asked whether it would, as the build user: {why}"
-        )),
-    }
-}
-
 /// Start an agent for each key this worker holds, and say what each is for.
 ///
 /// The default key's always, when there is one: every build may have it
@@ -129,18 +115,38 @@ fn gate_gap(gate: agent::HostSideGate) -> Option<String> {
 ///
 /// Held for the worker's lifetime: dropping one kills its agent, so no stray
 /// agent outlives the worker holding a credential.
-async fn start_agents(core: &CoreConfig, cfg: &Config) -> Vec<agent::BuildAgent> {
-    let mut agents = Vec::new();
+async fn start_agents(core: &CoreConfig, cfg: &Config) -> Agents {
+    let mut agents = Agents {
+        running: Vec::new(),
+        named_keys_gate: None,
+    };
     let default = credentials::resolve(cfg);
-    agents.extend(start_agent(core, cfg, aurcache_common::ssh_key::DEFAULT, default.path()).await);
+    agents
+        .running
+        .extend(start_agent(core, cfg, aurcache_common::ssh_key::DEFAULT, default.path()).await);
     if cfg.named_ssh_keys.is_empty() {
         return agents;
     }
+    // The sandbox judges the directory where it really is, so it has to be
+    // there to be judged.
+    if let Err(e) = agent::ensure_dir(&core.data_dir) {
+        tracing::warn!("The agents' directory is not there to ask about ({e:#})");
+    }
     let sandbox = agent::sandbox_capabilities(&cfg.build_user, &core.data_dir);
-    match gate_gap(agent::host_side_gate(sandbox).await) {
+    match agent::host_side_gate(sandbox).await.gap() {
         None => {
             for key in &cfg.named_ssh_keys {
-                agents.extend(start_agent(core, cfg, &key.name, &key.path).await);
+                agents
+                    .running
+                    .extend(start_agent(core, cfg, &key.name, &key.path).await);
+            }
+            if agents
+                .running
+                .iter()
+                .any(|a| a.name() != aurcache_common::ssh_key::DEFAULT)
+            {
+                agents.named_keys_gate =
+                    Some(agent::NamedKeysGate::new(&cfg.build_user, &core.data_dir));
             }
             tracing::info!(
                 "Builds are refused the agents of the SSH keys they are not offered outside \
@@ -154,6 +160,13 @@ async fn start_agents(core: &CoreConfig, cfg: &Config) -> Vec<agent::BuildAgent>
         ),
     }
     agents
+}
+
+/// The agents a worker started, and, when some hold named keys, the gate
+/// asked again before each build.
+struct Agents {
+    running: Vec<agent::BuildAgent>,
+    named_keys_gate: Option<agent::NamedKeysGate>,
 }
 
 /// Start the agent holding the key `name`, from `path`; `None` when it does
@@ -228,9 +241,9 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     // environment: builds are offered the agents this worker started, and
     // never one an inherited `SSH_AUTH_SOCK` names.
     let mut ssh_keys = SshKeys::default();
-    for agent in &agents {
+    for agent in &agents.running {
         ssh_keys.insert(agent.name(), agent.socket().to_path_buf());
     }
-    let executor = ChrootExecutor::new(cfg, ssh_keys).await;
+    let executor = ChrootExecutor::new(cfg, ssh_keys, agents.named_keys_gate).await;
     Runner::new(core, client, executor).run().await
 }

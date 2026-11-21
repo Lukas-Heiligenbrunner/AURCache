@@ -30,7 +30,7 @@ pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<(
     // chroot's own, matching what a served build gets.
     let pacman_conf = existing("/etc/pacman.conf")?;
     // No key: a local build starts no agent.
-    let shared = Shared::new(cfg, SshKeys::default());
+    let shared = Shared::new(cfg, SshKeys::default(), None);
     let chroots = &shared.chroots;
     chroots.open().await?;
     chroots

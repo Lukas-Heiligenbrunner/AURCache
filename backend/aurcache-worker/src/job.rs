@@ -15,7 +15,7 @@ use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{Stop, StopWatch, log, report_warning, upload_artifacts};
-use aurcache_worker_core::ssh_key;
+use aurcache_worker_core::ssh_key::{self, SshOffer};
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, Access, BindMount};
@@ -90,9 +90,22 @@ async fn run_job_inner(
     let job = &claimed.job;
     // Decided before anything is prepared and said first in the build log, so
     // a fetch that fails for want of a key has the reason above it.
-    let ssh = ssh_key::offer(job, &shared.ssh_keys);
+    let mut ssh = ssh_key::offer(job, &shared.ssh_keys);
+    let mut notice = ssh.notice(&job.pkgbase);
+    // Asked before every build, so the worker's log says at once when the
+    // named keys' agents stop being kept from builds.
+    if !shared.named_keys_held().await
+        && let SshOffer::Offered { name, .. } = &ssh
+        && name != aurcache_common::ssh_key::DEFAULT
+    {
+        notice = Some(format!(
+            "SSH key {name:?} withheld: builds are no longer kept from its agent outside \
+             their chroot (the worker's log says why); building without one"
+        ));
+        ssh = SshOffer::NoKey;
+    }
     tracing::debug!("build {} of {}: {ssh:?}", job.build_id, job.pkgbase);
-    if let Some(notice) = ssh.notice(&job.pkgbase) {
+    if let Some(notice) = notice {
         log(client, job.build_id, &format!("[worker] {notice}\n")).await;
     }
     let ssh_agent = ssh.key().map(PathBuf::as_path);
