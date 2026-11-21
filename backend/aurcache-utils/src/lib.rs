@@ -30,6 +30,8 @@ pub mod snapshot;
 pub mod ssh;
 /// The numbers the stats page and the dashboard show.
 pub mod stats;
+/// Publishing packages built elsewhere.
+pub mod upload;
 pub mod vcs_check;
 pub mod worker_complete;
 /// Registering workers, and approving them without an operator.

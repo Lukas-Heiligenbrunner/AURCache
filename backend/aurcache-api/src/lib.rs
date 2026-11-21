@@ -19,5 +19,6 @@ pub mod spa;
 mod ssh;
 mod stats;
 pub mod ui_cache;
+mod upload;
 mod utils;
 mod worker;

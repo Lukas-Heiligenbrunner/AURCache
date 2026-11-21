@@ -234,6 +234,12 @@ pub async fn resume_publishing(
     repo: &Arc<Repository>,
     activity: &ActivityLog,
 ) {
+    // An upload still being received when the process stopped never became
+    // a build, and nothing will finish receiving it.
+    let abandoned = aurcache_utils::upload::discard_abandoned(repo).await;
+    if abandoned > 0 {
+        info!("removed {abandoned} upload(s) a restart interrupted");
+    }
     let interrupted = match publish::interrupted(db, repo).await {
         Ok(ids) => ids,
         Err(e) => {

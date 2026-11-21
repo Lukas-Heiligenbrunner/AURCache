@@ -235,7 +235,12 @@ async fn report_failure(
 
 /// Append to a build's log; a line that does not land is recorded where
 /// someone will come across it, when there is somewhere to record it.
-async fn log(activity: Option<&ActivityLog>, pkgbase: Option<&str>, number: i32, text: &str) {
+pub(crate) async fn log(
+    activity: Option<&ActivityLog>,
+    pkgbase: Option<&str>,
+    number: i32,
+    text: &str,
+) {
     if let Some(pkgbase) = pkgbase
         && let Err(e) = append_build_output(pkgbase, number, text).await
     {
@@ -647,16 +652,20 @@ pub fn expected_pkgnames(pkg: &packages::Model) -> Vec<String> {
     names
 }
 
-#[derive(Debug, Clone)]
-struct ParsedPkg {
-    name: String,
-    version: String,
+/// What a package's filename says it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedPkg {
+    pub(crate) name: String,
+    /// `[epoch:]pkgver-pkgrel`.
+    pub(crate) version: String,
+    pub(crate) arch: String,
 }
 
-/// Parse an Arch package filename into its name and version.
+/// Parse an Arch package filename into its name, version and architecture.
 ///
-/// e.g. `hello-2.12.1-1-x86_64.pkg.tar.zst` -> name `hello`, version `2.12.1-1`.
-fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
+/// e.g. `hello-2.12.1-1-x86_64.pkg.tar.zst` -> name `hello`, version
+/// `2.12.1-1`, arch `x86_64`.
+pub(crate) fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
     let (base, _) = filename
         .rsplit_once(".pkg.tar.")
         .ok_or_else(|| anyhow!("Invalid pkg filename: {filename}"))?;
@@ -666,6 +675,7 @@ fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
         bail!("Invalid pkg filename format: {filename}");
     }
 
+    let arch = parts[parts.len() - 1];
     let pkgrel = parts[parts.len() - 2];
     let pkgver = parts[parts.len() - 3];
     let name = parts[..parts.len() - 3].join("-");
@@ -673,6 +683,7 @@ fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
     Ok(ParsedPkg {
         name,
         version: format!("{pkgver}-{pkgrel}"),
+        arch: arch.to_string(),
     })
 }
 
@@ -691,12 +702,18 @@ fn check_contents(filename: &str, named: &ParsedPkg, entry: &PackageEntry) -> an
         entry.version,
         named.version
     );
+    ensure!(
+        entry.arch == named.arch,
+        "{filename} holds arch '{}', not '{}'",
+        entry.arch,
+        named.arch
+    );
     Ok(())
 }
 
 /// What a staged package file is to publishing.
 #[derive(Debug)]
-enum Artifact {
+pub(crate) enum Artifact {
     /// makepkg's split debug package of one of the expected pkgnames
     /// (`<pkgname>-debug`), which the server discards rather than publishing.
     ///
@@ -722,7 +739,7 @@ enum Artifact {
 /// under a job for `hello`); it does **not** and cannot verify the *binaries*
 /// of a correctly-named package (see design non-goals). A file that is not a
 /// `*.pkg.tar.*` at all is refused too.
-fn artifact(expected: &[String], filename: &str) -> anyhow::Result<Artifact> {
+pub(crate) fn artifact(expected: &[String], filename: &str) -> anyhow::Result<Artifact> {
     let parsed = parse_arch_pkg(filename)?;
     if parsed
         .name
@@ -748,6 +765,7 @@ mod tests {
         let p = parse_arch_pkg("hello-2.12.1-1-x86_64.pkg.tar.zst").unwrap();
         assert_eq!(p.name, "hello");
         assert_eq!(p.version, "2.12.1-1");
+        assert_eq!(p.arch, "x86_64");
     }
 
     #[test]

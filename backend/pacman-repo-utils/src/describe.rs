@@ -34,6 +34,8 @@ pub struct PackageEntry {
     pub pkgname: String,
     /// Its `.PKGINFO`'s `pkgver`: `[epoch:]pkgver-pkgrel`.
     pub version: String,
+    /// Its `.PKGINFO`'s `arch`.
+    pub arch: String,
 }
 
 // Bounds on reading one package archive. The package's builder writes the
@@ -205,6 +207,7 @@ pub fn describe_package(pkgfile: &Path) -> anyhow::Result<PackageEntry> {
 
     let pkgname = pkginfo.pkgname.clone();
     let version = pkginfo.pkgver.clone();
+    let arch = pkginfo.arch.clone();
     let dir_name = format!("{pkgname}-{version}");
 
     let mut desc = Desc::from(pkginfo);
@@ -221,6 +224,7 @@ pub fn describe_package(pkgfile: &Path) -> anyhow::Result<PackageEntry> {
         files,
         pkgname,
         version,
+        arch,
     })
 }
 

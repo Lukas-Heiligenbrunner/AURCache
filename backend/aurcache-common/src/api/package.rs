@@ -308,6 +308,22 @@ pub enum PackageSource {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UploadPackage {}
 
+/// The build an upload became.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UploadedBuild {
+    /// The pkgbase it is a build of.
+    pub pkgbase: String,
+    /// Its number within the package, as the build pages address it.
+    pub number: i32,
+    pub platform: String,
+    pub version: String,
+    /// `Successful` once it is in the repository; `Publishing` when the
+    /// first attempt hit a recoverable failure and the server is still at
+    /// it; `Failed` when publishing refused it, which its log explains.
+    pub status: crate::build_state::BuildState,
+}
+
 #[derive(Deserialize, Serialize, Default, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AurNotFoundPackage {}

@@ -33,6 +33,30 @@ checkout — together with every dependency of it that no requested package stil
 needs. A package that a requested package still depends on, directly or through
 others, stays as a dependency and only stops being requested.
 
+### Uploading packages built elsewhere
+
+A package that cannot be built where the workers run can be built anywhere
+else, with `makechrootpkg` or `makepkg`, and published as a build of it:
+
+```bash
+aurcli pkg upload gcc13 gcc13-*.pkg.tar.zst gcc13-*.pkg.tar.zst.sig
+aurcli pkg upload fonts fonts-1.0-1-any.pkg.tar.zst --platform aarch64
+```
+
+The package must already be here, as an AUR or git package, and nothing of it
+may be queued or running on that platform. The files are one build of it:
+
+- every package is one its source builds, each once, with an optional `.sig`;
+- all are one version, for one platform the package is built for
+  (`--platform` when every file is `arch = any`);
+- a `.PKGINFO` that disagrees with its filename, or an ASCII-armored `.sig`,
+  fails the build, and its log says why.
+
+It is published like a worker's build: the previous version leaves the
+repository, and so does any split package that the upload does not include.
+The package page has the same upload, for files small enough to read into the
+browser.
+
 Dependencies can be repointed when upstream changes what provides them:
 
 ```bash

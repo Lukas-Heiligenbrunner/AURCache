@@ -200,6 +200,7 @@ mod tests {
             files: "%FILES%\nusr/bin/x".to_string(),
             pkgname: String::new(),
             version: String::new(),
+            arch: String::new(),
         }
     }
 
@@ -361,6 +362,7 @@ mod tests {
             files: "%FILES%\nusr/bin/foo".to_string(),
             pkgname: String::new(),
             version: String::new(),
+            arch: String::new(),
         };
         update(
             tmp.path(),

@@ -122,6 +122,7 @@ pub struct ServerVersion(pub String);
         (path = "/api", api = crate::repo::RepoApi, tags = ["Repo"]),
         (path = "/api", api = crate::ssh::SshApi, tags = ["SSH"]),
         (path = "/api", api = crate::package::PackageApi, tags = ["Package"]),
+        (path = "/api", api = crate::upload::UploadApi, tags = ["Package"]),
         (path = "/api", api = crate::stats::StatsApi, tags = ["Stats"]),
         (path = "/api", api = crate::dump::DumpApi, tags = ["Dump"]),
         (path = "/api", api = crate::log::LogApi, tags = ["Log"]),

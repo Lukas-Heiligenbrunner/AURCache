@@ -3,7 +3,7 @@
 use crate::builds::{WatchScope, follow_trigger, list_scoped_builds};
 use crate::cli::{
     AddPackageArgs, DependencyCommand, ListPackagesArgs, OutputFormat, PackagesCommand, PatchArg,
-    PatchPackageArgs, UpdatePackageArgs,
+    PatchPackageArgs, UpdatePackageArgs, UploadPackageArgs,
 };
 use crate::output::{
     Progress, bool_label, follow_job, join_or_dash, option_text, print_done_message, print_table,
@@ -15,8 +15,10 @@ use aurcache_client::{
     AddPackageRequest, AddPackagesRequest, AurCacheClient, BulkAddAccepted, BulkAddEntry,
     BulkAddOutcome, BulkAddProgress, CandidateSource, DependencyOptions, ExtendedPackage,
     GitSourceSpec, PackageDependency, PackagePatch, PackageSource, ReplacementVerdict,
-    SimplePackage, SourceData, UpdatePackage, looks_like_git_url,
+    SimplePackage, SourceData, UpdatePackage, UploadedBuild, looks_like_git_url,
 };
+use aurcache_common::build_state::BuildState;
+use aurcache_common::upload::FileKind;
 use dialoguer::Confirm;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
@@ -32,6 +34,7 @@ pub(crate) async fn run_packages_command(
         PackagesCommand::Add(args) => add_package_command(client, format, args).await,
         PackagesCommand::Update(args) => update_package_command(client, format, args).await,
         PackagesCommand::Patch(args) => patch_package_command(client, format, args).await,
+        PackagesCommand::Upload(args) => upload_package_command(client, format, args).await,
         PackagesCommand::Dep { command } => run_dependency_command(client, format, command).await,
         PackagesCommand::Rm { pkgbases } => {
             remove_packages_command(client, format, &pkgbases).await
@@ -321,6 +324,57 @@ pub(crate) async fn update_package_command(
     })?;
     let scope = scope.map(|scope| scope.triggered(&args.pkgbase, queued.iter().copied()));
     follow_trigger(client, format, &args.wait, scope).await
+}
+
+pub(crate) async fn upload_package_command(
+    client: &AurCacheClient,
+    format: OutputFormat,
+    args: UploadPackageArgs,
+) -> Result<()> {
+    // Refuse by name before sending what could be gigabytes.
+    for path in &args.files {
+        let name = path.file_name().and_then(|name| name.to_str());
+        FileKind::of(name.unwrap_or_default()).map_err(|e| anyhow!(e))?;
+    }
+    // The auth guard's refusal is not drained, so check the token first (see
+    // design/implemented/package-uploads.md#refusals).
+    client
+        .user_info()
+        .await
+        .context("checking the token before uploading")?;
+    let uploaded = client
+        .upload_package(&args.pkgbase, args.platform.as_deref(), &args.files)
+        .await?;
+    render(format, &uploaded, print_uploaded)?;
+    upload_result(&uploaded)
+}
+
+fn print_uploaded(uploaded: &UploadedBuild) {
+    let UploadedBuild {
+        pkgbase,
+        number,
+        platform,
+        version,
+        status,
+    } = uploaded;
+    println!(
+        "{pkgbase}/{number}: {version} for {platform}, {}",
+        status.label()
+    );
+}
+
+/// Fail when the upload's build did, pointing at its log, which says why.
+fn upload_result(uploaded: &UploadedBuild) -> Result<()> {
+    match uploaded.status {
+        BuildState::Failed => bail!(
+            "publishing {}/{} failed; `aurcli builds output {}/{}` says why",
+            uploaded.pkgbase,
+            uploaded.number,
+            uploaded.pkgbase,
+            uploaded.number
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// The numbers come back bare, so they are printed against the package they
