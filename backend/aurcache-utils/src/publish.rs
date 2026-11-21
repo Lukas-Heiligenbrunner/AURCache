@@ -17,14 +17,16 @@ use aurcache_common::api::log::BuildRef;
 use aurcache_common::build_state::BuildState;
 use aurcache_db::helpers::builds::{Transition, refresh_package_status, transition};
 use aurcache_db::helpers::time::now_secs;
-use aurcache_db::prelude::{Builds, Dependencies, Files, Packages};
-use aurcache_db::{builds, dependencies, files, packages};
+use aurcache_db::lists::JsonList;
+use aurcache_db::prelude::{Builds, Files, Packages};
+use aurcache_db::{builds, files, packages};
 use pacman_mirrors::platforms::Platform;
 use pacman_repo_utils::PackageEntry;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
-    QueryFilter, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
+    FromQueryResult, QueryFilter, QuerySelect, Set,
 };
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -297,7 +299,8 @@ struct FileRow {
 struct Plan {
     rows: Vec<FileRow>,
     /// This package's files on this platform that the build no longer
-    /// produces.
+    /// produces, and another package's files of a name that it publishes (see
+    /// [`plan`]).
     stale: Vec<PublishedFile>,
     version: String,
     total_size: i64,
@@ -443,9 +446,9 @@ async fn read_staging(
 
 /// Decide who owns each file and what goes stale, from what `update` reads.
 ///
-/// A filename another package already publishes is refused, unless that
-/// package depends on this one (the file moved between them) or no longer
-/// exists (the row is a leftover, not a claim).
+/// The build's names are its package's alone (see [`ensure_names_free`]), so
+/// another package's file of one of them is stale and is retired, or taken
+/// over when the build stages that very file.
 async fn plan(
     update: &Update<'_>,
     db: &DatabaseConnection,
@@ -454,57 +457,40 @@ async fn plan(
     described: &[Staged],
     version: String,
 ) -> anyhow::Result<Plan> {
-    // What this platform already publishes, in one query rather than one per
-    // staged file (see `Update::published_files`).
-    let known = update
-        .published_files(
-            db,
-            platform,
-            &described
-                .iter()
-                .map(|staged| staged.filename.clone())
-                .collect::<Vec<_>>(),
-        )
+    let pkgnames: Vec<String> = described
+        .iter()
+        .map(|staged| staged.entry.pkgname.clone())
+        .collect();
+    ensure!(
+        pkgnames.iter().collect::<HashSet<_>>().len() == pkgnames.len(),
+        "the build stages two files of one package name: a build publishes each name once"
+    );
+    // Again, for refreshes that raced on PostgreSQL.
+    ensure_names_free(db, pkg.id, &pkgnames).await?;
+    let named = update
+        .published_files_named(db, platform, &pkgnames)
         .await?;
-    let mut rows = Vec::with_capacity(described.len());
-    for staged in described {
-        let existing = known.get(&staged.filename);
-        if let Some(existing) = existing
-            && existing.package_id() != pkg.id
-        {
-            // Counted rather than read: all this needs is whether the row is
-            // there, and loading the model would also have to deserialize
-            // columns like `source_data`.
-            let owner_exists = Packages::find_by_id(existing.package_id())
-                .count(db)
-                .await?
-                > 0;
-            let owner_depends_on_us = Dependencies::find()
-                .filter(dependencies::Column::DependentId.eq(existing.package_id()))
-                .filter(dependencies::Column::DependeeId.eq(pkg.id))
-                .count(db)
-                .await?
-                > 0;
-            if owner_exists && !owner_depends_on_us {
-                bail!(
-                    "File '{}' is already produced by another package",
-                    staged.filename
-                );
-            }
-        }
-        rows.push(FileRow {
-            filename: staged.filename.clone(),
-            existing: existing.map(PublishedFile::id),
-            size: staged.size,
-        });
-    }
 
-    let published: Vec<&str> = described.iter().map(|s| s.filename.as_str()).collect();
+    let rows = described
+        .iter()
+        .map(|staged| FileRow {
+            filename: staged.filename.clone(),
+            existing: named
+                .iter()
+                .find(|file| file.filename() == staged.filename)
+                .map(PublishedFile::id),
+            size: staged.size,
+        })
+        .collect();
+
+    let staged_names: Vec<&str> = described.iter().map(|s| s.filename.as_str()).collect();
     let stale = update
         .published_files_of(db, &[pkg.id])
         .await?
         .into_iter()
-        .filter(|file| file.platform() == platform && !published.contains(&file.filename()))
+        .filter(|file| file.platform() == platform)
+        .chain(named.into_iter().filter(|file| file.package_id() != pkg.id))
+        .filter(|file| !staged_names.contains(&file.filename()))
         .collect();
 
     Ok(Plan {
@@ -513,6 +499,94 @@ async fn plan(
         version,
         total_size: described.iter().map(|s| s.size).sum(),
     })
+}
+
+/// A package's expected names (see [`expected_pkgnames`]).
+#[derive(FromQueryResult)]
+pub(crate) struct NamesRow {
+    id: i32,
+    pub(crate) name: String,
+    split_packages: Option<JsonList>,
+}
+
+impl NamesRow {
+    fn names(&self) -> Vec<String> {
+        names_of(&self.name, self.split_packages.as_ref())
+    }
+
+    /// "'foo' is already built by package 'bar'", for each of `names` that
+    /// this package builds.
+    pub(crate) fn refusals<'a>(&'a self, names: &'a [String]) -> impl Iterator<Item = String> + 'a {
+        self.names()
+            .into_iter()
+            .filter(|name| names.contains(name))
+            .map(|name| format!("'{name}' is already built by package '{}'", self.name))
+    }
+}
+
+pub(crate) async fn names_rows<C: ConnectionTrait>(db: &C) -> Result<Vec<NamesRow>, DbErr> {
+    Packages::find()
+        .select_only()
+        .column(packages::Column::Id)
+        .column(packages::Column::Name)
+        .column(packages::Column::SplitPackages)
+        .into_model::<NamesRow>()
+        .all(db)
+        .await
+}
+
+/// Refuse `names` for the package `pkg_id` when another package's expected
+/// names hold one of them: no two packages may build one name, or `repo.db`
+/// would list it twice.
+///
+/// Called in the transaction that records the names. On SQLite that
+/// transaction holds the write lock by then; on PostgreSQL two concurrent ones
+/// can both pass, so publishing checks again.
+pub(crate) async fn ensure_names_free<C: ConnectionTrait>(
+    db: &C,
+    pkg_id: i32,
+    names: &[String],
+) -> anyhow::Result<()> {
+    for other in names_rows(db).await? {
+        if other.id == pkg_id {
+            continue;
+        }
+        if let Some(refusal) = other.refusals(names).next() {
+            bail!("{refusal}");
+        }
+    }
+    Ok(())
+}
+
+/// A package name that is among the expected names of more than one package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedName {
+    pub name: String,
+    /// The packages expected to build it, by name, in order.
+    pub packages: Vec<String>,
+}
+
+/// Every package name that more than one package is expected to build: left
+/// by data from before such overlaps were refused, or by refreshes that raced
+/// on PostgreSQL.
+///
+/// # Errors
+/// The `packages` table could not be read.
+pub async fn shared_names<C: ConnectionTrait>(db: &C) -> Result<Vec<SharedName>, DbErr> {
+    let mut builders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for row in names_rows(db).await? {
+        for name in row.names() {
+            builders.entry(name).or_default().insert(row.name.clone());
+        }
+    }
+    Ok(builders
+        .into_iter()
+        .filter(|(_, packages)| packages.len() > 1)
+        .map(|(name, packages)| SharedName {
+            name,
+            packages: packages.into_iter().collect(),
+        })
+        .collect())
 }
 
 /// The one database transaction: the files, the build's result and what it
@@ -643,8 +717,12 @@ pub async fn interrupted(db: &DatabaseConnection, repo: &Repository) -> anyhow::
 /// The package names a build of `pkg` may produce: its pkgbase plus any
 /// split-package names recorded on the package row.
 pub fn expected_pkgnames(pkg: &packages::Model) -> Vec<String> {
-    let mut names = vec![pkg.name.clone()];
-    for name in aurcache_db::lists::JsonList::entries(pkg.split_packages.as_ref()) {
+    names_of(&pkg.name, pkg.split_packages.as_ref())
+}
+
+pub(crate) fn names_of(pkgbase: &str, split_packages: Option<&JsonList>) -> Vec<String> {
+    let mut names = vec![pkgbase.to_string()];
+    for name in JsonList::entries(split_packages) {
         if !names.contains(name) {
             names.push(name.clone());
         }

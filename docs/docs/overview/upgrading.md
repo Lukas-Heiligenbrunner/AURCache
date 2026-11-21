@@ -177,6 +177,20 @@ worker](../workers/docker.md#other-architectures).
 The hybrid image is for keeping an existing setup running. When convenient,
 move to a server and a separate worker; see [Migrating](../workers/hybrid.md#migrating).
 
+## One package per package name
+
+A package name is built by one package at a time. Adding a package, or
+refreshing a package's source, is refused when another package already builds
+one of its names (`'foo' is already built by package 'bar'`). A build that
+publishes a name retires any other package's entry of it from the
+repository, such as one left by a package whose source no longer builds it.
+Earlier releases published both whenever their versions differed, so
+`repo.db` could list a name twice.
+
+Packages whose sources already build the same name when you upgrade are named
+in the log at each start (`'x' is built by more than one package`). Their
+updates and builds fail until one of them no longer builds it, or is removed.
+
 ## Going back to an earlier release
 
 Restoring the backup taken before upgrading is the way back from any release.

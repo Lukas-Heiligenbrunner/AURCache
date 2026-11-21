@@ -328,6 +328,8 @@ async fn package_update_inner(
         .await
         .context("Failed to read the PKGBUILD")?;
     let upstream_version = sourceinfo.base.version.to_string();
+    // First, so that a source whose names are refused changes nothing else.
+    record_source_names(&services.db, pkg_model.id, &pkg_model.name, &deps).await?;
 
     let former = direct_dependees(&services.db, pkg_model.id).await?;
     let graph = sync_dependency_graph(services, &pkg_model, &deps).await?;
@@ -411,7 +413,6 @@ async fn package_update_inner(
 
     // The status is not written here: queueing the builds above brought it in
     // line with them.
-    record_source_names(&services.db, pkg_model.id, &pkg_model.name, &deps).await?;
     packages::ActiveModel {
         id: Set(pkg_model.id),
         upstream_version: Set(Some(upstream_version.clone())),
@@ -991,6 +992,7 @@ mod tests {
     use super::{Rebuild, package_update};
     use aurcache_activitylog::activity_utils::ActivityLog;
     use aurcache_common::build_state::BuildTrigger;
+    use aurcache_db::lists::JsonList;
     use aurcache_db::testing::{build, depend, package};
     /// A repository of its own for a test that never publishes to it.
     fn test_repo() -> Arc<crate::repository::Repository> {
@@ -1791,6 +1793,74 @@ mod tests {
         assert_eq!(parent_after.upstream_version.as_deref(), Some("2.0.0-1"));
     }
 
+    /// A name that moves from a package's own split packages to a new AUR
+    /// dependency: the package's names are recorded first, so the dependency
+    /// is free to take it.
+    #[tokio::test]
+    async fn a_split_name_can_move_to_a_new_dependency() {
+        let server = MockServer::start().await;
+        let TestClient { client, _repos } =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
+        let db = aurcache_db::testing::memory_db().await;
+        Mock::given(method("GET"))
+            .and(path("/rpc/v5/info"))
+            .and(query_param("arg[]", "new-dep"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![rpc_deps_json(
+                    "new-dep",
+                    "new-dep",
+                    &[],
+                    &[],
+                    "2.0.0",
+                )])),
+            )
+            .mount(&server)
+            .await;
+        let aur_root = tempdir().unwrap();
+        crate::test_git::create_repo(
+            &aur_root.path().join("new-dep.git"),
+            &[
+                ("PKGBUILD", "pkgname=new-dep\npkgver=2.0.0\npkgrel=1\n"),
+                (".SRCINFO", &make_srcinfo("new-dep", "2.0.0", &[])),
+            ],
+        );
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_pkgbuild(&repo, "split off new-dep", "2.0.0", &["new-dep"]);
+        let parent = package("git-parent")
+            .source(packages::SourceData::Git {
+                spec: packages::GitSourceSpec {
+                    url: dir.path().to_string_lossy().to_string(),
+                    r#ref: "main".to_string(),
+                    subfolder: ".".to_string(),
+                },
+            })
+            .with(|row| {
+                row.split_packages = Set(Some(JsonList::new(["git-parent", "new-dep"])));
+            })
+            .insert(&db)
+            .await;
+        let TestStore { store, _checkouts } = test_store(aur_root.path());
+
+        package_update(
+            &services(&db, store, client),
+            parent,
+            Rebuild::Never,
+            BuildTrigger::User,
+        )
+        .await
+        .unwrap();
+
+        let names: Vec<String> = Packages::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["git-parent", "new-dep"]);
+    }
+
     /// What [`two_providers_of_one_name`] sets up.
     struct TwoProviders {
         parent: packages::Model,
@@ -2175,6 +2245,57 @@ mod tests {
             build_count, 0,
             "build records for deleted package should be removed"
         );
+    }
+
+    /// A refresh whose source now builds a name that another package builds
+    /// is refused: the package keeps its names, and nothing is queued.
+    #[tokio::test]
+    async fn a_refresh_taking_another_packages_name_is_refused() {
+        let server = MockServer::start().await;
+        let TestClient { client, _repos } =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
+        let db = aurcache_db::testing::memory_db().await;
+        let aur_root = tempdir().unwrap();
+        crate::test_git::create_repo(
+            &aur_root.path().join("mypkg.git"),
+            &[
+                ("PKGBUILD", "pkgbase=mypkg\npkgname=(mypkg taken)\n"),
+                (
+                    ".SRCINFO",
+                    &format!("{}pkgname = taken\n", make_srcinfo("mypkg", "1.0.0", &[])),
+                ),
+            ],
+        );
+        let pkg = package("mypkg").insert(&db).await;
+        package("other")
+            .with(|row| {
+                row.split_packages = Set(Some(JsonList::new(["other", "taken"])));
+            })
+            .insert(&db)
+            .await;
+        let TestStore { store, _checkouts } = test_store(aur_root.path());
+
+        let err = package_update(
+            &services(&db, store, client),
+            pkg.clone(),
+            Rebuild::Always,
+            BuildTrigger::User,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("'taken' is already built by package 'other'"),
+            "{err}"
+        );
+        let after = Packages::find_by_id(pkg.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.split_packages, None);
+        assert_eq!(builds::Entity::find().count(&db).await.unwrap(), 0);
     }
 
     /// A version every platform has built is an outcome, not a failure: the

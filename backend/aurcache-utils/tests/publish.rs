@@ -60,6 +60,11 @@ async fn status(db: &DatabaseConnection, build_id: i32) -> BuildState {
         .status
 }
 
+async fn log_of(pkgbase: &str, number: i32) -> String {
+    std::fs::read_to_string(aurcache_common::fs::build_log_path(pkgbase, number))
+        .unwrap_or_default()
+}
+
 #[tokio::test]
 async fn a_database_error_preserves_staging_for_recovery() {
     let db = db().await;
@@ -222,27 +227,69 @@ async fn a_new_version_replaces_the_old_one() {
     );
 }
 
-/// A file another live package publishes is refused -- and a refusal fails the
-/// build while leaving the repository exactly as it was.
-#[tokio::test]
-async fn a_file_owned_by_a_live_package_fails_the_build_and_changes_nothing() {
-    let db = db().await;
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = Repository::new(tmp.path());
-    package(&db, 1, "other").await;
-    package(&db, 2, "hello").await;
+/// `other` published `hello` before, and `hello` builds it now.
+async fn hello_published_by_other(db: &DatabaseConnection, version: &str) {
+    package(db, 1, "other").await;
+    package(db, 2, "hello").await;
     db.execute_unprepared(&format!(
         "INSERT INTO files (filename, platform, package_id) VALUES ('{}', 'x86_64', 1)",
-        filename("hello", "2.12.1-1")
+        filename("hello", version)
     ))
     .await
     .unwrap();
-    publishing_build(&db, 1, 2).await;
+    publishing_build(db, 1, 2).await;
+}
+
+/// Another package's entry of a name is stale once its package no longer
+/// builds the name, and leaves `repo.db` whatever its version.
+#[tokio::test]
+async fn another_packages_stale_entry_of_the_name_is_retired() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    hello_published_by_other(&db, "1.0-1").await;
+    stage(&repo, 1, "hello", "2.12.1-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(status(&db, 1).await, BuildState::Successful);
+    let rows = Files::find().all(&db).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].package_id, 2);
+    assert_eq!(listed(tmp.path(), "x86_64"), ["hello-2.12.1-1"]);
+}
+
+/// A name that another package is still expected to build is refused, and
+/// the refusal leaves the repository exactly as it was.
+#[tokio::test]
+async fn a_name_another_package_builds_fails_the_build_and_changes_nothing() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    hello_published_by_other(&db, "2.12.1-1").await;
+    db.execute_unprepared(
+        "UPDATE packages SET split_packages = '[\"other\",\"hello\"]' WHERE id = 1",
+    )
+    .await
+    .unwrap();
     stage(&repo, 1, "hello", "2.12.1-1");
 
     publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
 
     assert_eq!(status(&db, 1).await, BuildState::Failed);
+    let log = log_of("hello", 1).await;
+    assert!(
+        log.contains("'hello' is already built by package 'other'"),
+        "{log}"
+    );
+    assert_eq!(
+        aurcache_utils::publish::shared_names(&db).await.unwrap(),
+        [aurcache_utils::publish::SharedName {
+            name: "hello".to_string(),
+            packages: vec!["hello".to_string(), "other".to_string()],
+        }],
+        "the startup warning names it"
+    );
     let pkg = Packages::find_by_id(2).one(&db).await.unwrap().unwrap();
     assert_eq!(pkg.status, BuildState::Failed);
     let rows = Files::find().all(&db).await.unwrap();
@@ -579,4 +626,28 @@ async fn a_background_publication_retries_failed_dependent_promotion() {
         .unwrap();
     assert_eq!(status(&db, 2).await, BuildState::Enqueued);
     assert!(!repo.staging_dir(1).exists());
+}
+
+/// One build may not stage two files of one package name, whichever
+/// versions they are: `repo.db` would list both.
+#[tokio::test]
+async fn a_build_staging_a_name_twice_fails() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    package(&db, 1, "twice").await;
+    publishing_build(&db, 1, 1).await;
+    stage(&repo, 1, "twice", "1.0-1");
+    stage(&repo, 1, "twice", "2.0-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(status(&db, 1).await, BuildState::Failed);
+    let log = log_of("twice", 1).await;
+    assert!(log.contains("two files of one package name"), "{log}");
+    assert!(Files::find().all(&db).await.unwrap().is_empty());
+    assert!(
+        listed(tmp.path(), "x86_64").is_empty(),
+        "nothing reached repo.db"
+    );
 }

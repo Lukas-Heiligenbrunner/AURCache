@@ -235,30 +235,29 @@ pub struct Update<'a> {
 }
 
 impl Update<'_> {
-    /// Which of `filenames` are already published on `platform`, keyed by
-    /// filename.
+    /// The files published on `platform` for any of the package names
+    /// `pkgnames`, whichever package publishes them.
     ///
-    /// One query rather than one per file: a split package publishes several
-    /// outputs, and planning runs under the repository lock, where every
-    /// round trip lengthens the critical section. Stamped with this update
-    /// like the single-file read, so the retire discipline is unchanged.
-    pub async fn published_files<C: ConnectionTrait>(
+    /// The platform's rows are read whole and matched by the name parsed from
+    /// each filename: SQL cannot match the name part exactly, as `foo-` also
+    /// starts `foo-bar`'s files.
+    pub async fn published_files_named<C: ConnectionTrait>(
         &self,
         db: &C,
         platform: Platform,
-        filenames: &[String],
-    ) -> anyhow::Result<HashMap<String, PublishedFile>> {
-        if filenames.is_empty() {
-            return Ok(HashMap::new());
-        }
+        pkgnames: &[String],
+    ) -> anyhow::Result<Vec<PublishedFile>> {
         let rows = Files::find()
-            .filter(files::Column::Filename.is_in(filenames.iter().map(String::as_str)))
             .filter(files::Column::Platform.eq(platform))
             .all(db)
             .await?;
         Ok(rows
             .into_iter()
-            .map(|row| (row.filename.clone(), self.published(row)))
+            .filter(|row| {
+                crate::publish::parse_arch_pkg(&row.filename)
+                    .is_ok_and(|named| pkgnames.contains(&named.name))
+            })
+            .map(|row| self.published(row))
             .collect())
     }
 
