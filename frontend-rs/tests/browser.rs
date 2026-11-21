@@ -1867,7 +1867,7 @@ async fn a_refused_build_flag_save_keeps_the_dialog_and_its_draft(session: &Sess
             && session.checked("#build-flag-nocheck").await,
         "the refusal lost the draft"
     );
-    session.wait_for_focus(".modal-open .modal-box").await;
+    session.wait_for_focus(".modal-open [role=alert]").await;
     session.press_key(Key::Escape).await;
     session.wait_gone(".modal-open").await;
     session
