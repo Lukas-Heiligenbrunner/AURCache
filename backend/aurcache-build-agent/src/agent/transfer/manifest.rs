@@ -1,12 +1,11 @@
-//! Say what the build left: its report and each package's name, size and digest.
+//! Say what the build left: its report and each package's name and size.
 
-use super::file::{Beneath, Opened, OpenedDir, open_dir_in, pump};
+use super::file::{Beneath, Opened, OpenedDir, open_dir_in};
 use anyhow::{Context, Result, bail};
 use aurcache_build_agent::layout::{OUT_DIR, PKG_DIR, REPORT_FILE, Work};
 use aurcache_build_agent::report::{Artifact, BuildReport, Handback};
 use aurcache_build_agent::spec::INTERFACE;
 use aurcache_common::artifact::is_artifact;
-use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -81,42 +80,21 @@ fn artifacts(work: &Work) -> Result<Vec<Artifact>> {
     Ok(artifacts)
 }
 
-/// `name`'s size and digest, or `None` if it is not a regular file. `dir`
-/// is where `pkg` is, for messages.
+/// `name`'s size, or `None` if it is not a regular file. `dir` is where
+/// `pkg` is, for messages.
 fn describe(pkg: &Beneath, dir: &Path, name: String) -> Result<Option<Artifact>> {
     let path = dir.join(&name);
-    let Opened::Regular(mut file) = pkg
+    let Opened::Regular(file) = pkg
         .regular(&name)
         .with_context(|| format!("cannot open {}", path.display()))?
     else {
         return Ok(None);
     };
-    let mut hash = Hashing::default();
-    pump(&mut file, &mut hash).with_context(|| format!("cannot read {}", path.display()))?;
-    Ok(Some(Artifact {
-        name,
-        size: hash.bytes,
-        sha256: hex::encode(hash.digest.finalize()),
-    }))
-}
-
-/// A sink that counts and hashes what is written to it, and keeps none of it.
-#[derive(Default)]
-struct Hashing {
-    digest: Sha256,
-    bytes: u64,
-}
-
-impl Write for Hashing {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.digest.update(data);
-        self.bytes += data.len() as u64;
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
+    let size = file
+        .metadata()
+        .with_context(|| format!("cannot read {}", path.display()))?
+        .len();
+    Ok(Some(Artifact { name, size }))
 }
 
 #[cfg(test)]
@@ -126,11 +104,10 @@ mod tests {
     use aurcache_build_agent::report::Artifact;
     use std::os::unix::fs::symlink;
 
-    fn artifact(name: &str, size: u64, sha256: &str) -> Artifact {
+    fn artifact(name: &str, size: u64) -> Artifact {
         Artifact {
             name: name.to_string(),
             size,
-            sha256: sha256.to_string(),
         }
     }
 
@@ -149,16 +126,8 @@ mod tests {
         assert_eq!(
             artifacts(&work).unwrap(),
             [
-                artifact(
-                    "a-1-1-any.pkg.tar.zst",
-                    0,
-                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                ),
-                artifact(
-                    "b-1-1-any.pkg.tar.zst",
-                    5,
-                    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-                ),
+                artifact("a-1-1-any.pkg.tar.zst", 0),
+                artifact("b-1-1-any.pkg.tar.zst", 5),
             ]
         );
     }

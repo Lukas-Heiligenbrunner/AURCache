@@ -185,8 +185,8 @@ pub fn build_agent_path() -> String {
 /// Stated on every such container, limits included: a ResourceQuota on
 /// `requests.cpu`, `requests.memory`, `limits.cpu` or `limits.memory`
 /// refuses a pod with a container that leaves the line out. The CPU limit is
-/// one whole CPU, which is all a subcommand uses: it is what hashes and
-/// sends the packages.
+/// one whole CPU, which is all a subcommand uses: it is what sends the
+/// packages.
 #[must_use]
 pub fn helper_resources() -> ResourceRequirements {
     ResourceRequirements {

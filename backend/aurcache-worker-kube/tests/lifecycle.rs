@@ -559,51 +559,6 @@ async fn a_log_stream_lost_twice_is_resumed_without_a_repeated_or_missing_byte()
     assert_eq!(forwarded, log);
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_digest_mismatch_is_retried_once_from_a_fresh_send() {
-    let rig = Rig::new(Script {
-        packages: vec![Package::of("hello-1.0-1-x86_64.pkg.tar.zst", b"hello")],
-        sends: [Sending::Corrupt].into(),
-        ..Script::default()
-    });
-    let built = rig.build(&claimed(7, None)).await;
-    assert_eq!(built.report.outcome, BuildOutcome::Succeeded);
-    let taken = rig.sink.taken();
-    assert_eq!(taken.len(), 2, "the file was sent again, whole");
-    assert_ne!(taken[0].bytes, b"hello");
-    assert_eq!(taken[1].bytes, b"hello");
-    assert_eq!(
-        rig.cluster
-            .execs()
-            .iter()
-            .filter(|exec| exec.contains("send"))
-            .count(),
-        2
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_digest_that_never_matches_is_an_interruption_after_one_retry() {
-    let rig = Rig::new(Script {
-        packages: vec![Package::of("hello-1.0-1-x86_64.pkg.tar.zst", b"hello")],
-        sends: [Sending::Corrupt, Sending::Corrupt].into(),
-        ..Script::default()
-    });
-    let built = rig.build(&claimed(7, None)).await;
-    assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
-    assert!(reason(&built).contains("SHA-256"), "{}", reason(&built));
-    assert!(
-        reason(&built).starts_with("uploading hello-1.0-1-x86_64.pkg.tar.zst"),
-        "{}",
-        reason(&built)
-    );
-    assert_eq!(rig.sink.taken().len(), 2, "one retry, and no more");
-    // The build itself succeeded, and what it measured is still reported.
-    assert_eq!(built.report.peak_memory_bytes, Some(3 << 30));
-    assert!(built.log.contains("[worker] uploading hello"));
-    assert_cleaned_up(&rig, 7);
-}
-
 /// A `tail` cut short can still end in success. The log is followed on from
 /// where it stopped, and only a `tail` with nothing more to send ends it.
 #[tokio::test(start_paused = true)]
@@ -707,7 +662,7 @@ async fn a_package_the_server_refuses_is_not_retried() {
 async fn a_manifest_naming_something_that_is_not_a_package_is_refused() {
     let manifest = r#"{"interface":1,"report":{"interface":1,"ended":{"how":"exited","code":0},
         "peak_memory_bytes":null,"oom_kills":null,"disk_bytes":null,"vcs_commits":{}},
-        "artifacts":[{"name":"../x","size":1,"sha256":"00"}]}"#;
+        "artifacts":[{"name":"../x","size":1}]}"#;
     let rig = Rig::new(Script {
         manifest: Some(manifest.to_string()),
         ..Script::default()

@@ -31,8 +31,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sha2 = "0.11.1"
-hex = "0.4.3"
 aurcache-common = { path = "../aurcache-common" }
 aurcache-worker-core = { path = "../aurcache-worker-core" }
 aurcache-worker-container = { path = "../aurcache-worker-container" }
