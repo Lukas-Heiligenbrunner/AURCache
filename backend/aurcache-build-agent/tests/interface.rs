@@ -153,14 +153,10 @@ fn handbacks() -> Vec<Handback> {
                 Artifact {
                     name: "hello-1.0-1-x86_64.pkg.tar.zst".to_string(),
                     size: 4096,
-                    sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-                        .to_string(),
                 },
                 Artifact {
                     name: "hello-docs-1.0-1-any.pkg.tar.zst".to_string(),
                     size: 0,
-                    sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                        .to_string(),
                 },
             ],
         },

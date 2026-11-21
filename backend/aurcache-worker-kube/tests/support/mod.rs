@@ -26,7 +26,6 @@ use aurcache_worker_kube::executor::{Build, KubeExecutor};
 use aurcache_worker_kube::transfer::Uploads;
 use futures::FutureExt;
 use k8s_openapi::api::core::v1::{Pod, PodStatus};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::io;
@@ -203,23 +202,9 @@ impl Package {
 
     /// The line of the manifest for this package.
     pub fn artifact(&self) -> Artifact {
-        let mut digest = Sha256::new();
-        match &self.content {
-            Content::Bytes(bytes) => digest.update(bytes),
-            Content::Zeros(len) => {
-                let block = vec![0_u8; 1 << 20];
-                let mut left = *len;
-                while left > 0 {
-                    let now = left.min(block.len() as u64);
-                    digest.update(&block[..usize::try_from(now).unwrap()]);
-                    left -= now;
-                }
-            }
-        }
         Artifact {
             name: self.name.clone(),
             size: self.size(),
-            sha256: hex::encode(digest.finalize()),
         }
     }
 
@@ -262,8 +247,6 @@ pub enum AfterLog {
 #[derive(Clone, Debug)]
 pub enum Sending {
     Whole,
-    /// One byte differs from the file the manifest describes.
-    Corrupt,
     /// The stream breaks after this many bytes.
     Breaks {
         after: usize,
@@ -739,13 +722,6 @@ impl FakeCluster {
         let whole = package.step();
         match script.sends.pop_front().unwrap_or(Sending::Whole) {
             Sending::Whole => played(vec![whole], chunk, ExecEnd::Succeeded),
-            Sending::Corrupt => {
-                let Step::Bytes(mut bytes) = whole else {
-                    panic!("only a package of bytes can be corrupted");
-                };
-                bytes[0] ^= 0xff;
-                played(vec![Step::Bytes(bytes)], chunk, ExecEnd::Succeeded)
-            }
             Sending::Breaks { after } => {
                 let Step::Bytes(mut bytes) = whole else {
                     panic!("only a package of bytes can break part way");

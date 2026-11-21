@@ -28,8 +28,6 @@ libc = "0.2.191"
 rustix = { version = "1.1", features = ["fs"] }
 tar = { workspace = true }
 flate2 = { workspace = true }
-sha2 = "0.11.1"
-hex = "0.4.3"
 # The types only: no database, filesystem or clock helpers.
 aurcache-common = { path = "../aurcache-common", default-features = false }
 

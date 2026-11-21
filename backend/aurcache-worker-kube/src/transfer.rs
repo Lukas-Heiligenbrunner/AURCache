@@ -5,7 +5,7 @@
 //!
 //! Nothing here holds a package: no temporary file, no buffer of a whole file.
 //! A package's bytes go from the exec's bounded pipe into the upload's request
-//! body as the upload asks for them, and are counted and hashed on the way.
+//! body as the upload asks for them, and are counted on the way.
 
 use crate::cluster::{Cluster, Exec, ExecEnd, Stdin};
 use crate::outcome::{Observed, observe};
@@ -18,7 +18,6 @@ use aurcache_worker_container::input::Packed;
 use aurcache_worker_container::ssh::link::{self, Served};
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::protocol::PackagesRefused;
-use sha2::{Digest, Sha256};
 use std::io;
 use std::path::Path;
 use std::pin::Pin;
@@ -31,10 +30,9 @@ use tokio::sync::mpsc;
 /// The most a manifest may be. It is a line per package and a report of a
 /// few lines; anything near this is not one.
 const MANIFEST_LIMIT: u64 = 4 * 1024 * 1024;
-/// How long `manifest` may take. It hashes every package, so this is what
-/// tens of gigabytes take on a slow disk, and far more than a build's
-/// packages usually do.
-const MANIFEST_TIME: Duration = Duration::from_secs(30 * 60);
+/// How long `manifest` may take. It lists the packages and reads the
+/// report, a moment's work: this is for a pod that does not answer.
+const MANIFEST_TIME: Duration = Duration::from_secs(5 * 60);
 /// The most log held back while waiting for the end of a line.
 const LINE_CAP: usize = 64 * 1024;
 /// How long to wait before following the log again after its stream broke.
@@ -242,8 +240,8 @@ impl<C: Cluster> Agent<'_, C> {
         }
     }
 
-    /// What the build left: its report, and each package's name, size and
-    /// digest, within [`MANIFEST_TIME`].
+    /// What the build left: its report, and each package's name and size,
+    /// within [`MANIFEST_TIME`].
     pub async fn manifest(&self) -> Result<Handback> {
         tokio::time::timeout(MANIFEST_TIME, self.read_manifest())
             .await
@@ -289,8 +287,8 @@ impl<C: Cluster> Agent<'_, C> {
     /// Send one package from the pod to `uploads`, holding none of it.
     ///
     /// A file the server refuses for what it is fails at once, as a
-    /// [`PackagesRefused`]. Anything else -- a stream that broke, a count or
-    /// a digest that is not the manifest's -- is tried once more from a fresh
+    /// [`PackagesRefused`]. Anything else -- a stream that broke, a count
+    /// that is not the manifest's -- is tried once more from a fresh
     /// `send`, which overwrites what the first left on the server.
     pub async fn relay<U: Uploads>(
         &self,
@@ -442,24 +440,18 @@ fn whole_characters(bytes: &[u8]) -> usize {
 /// passed so far.
 struct Passing {
     stdout: Pin<Box<dyn AsyncRead + Send>>,
-    digest: Sha256,
     bytes: u64,
 }
 
 impl Passing {
     fn new(stdout: Pin<Box<dyn AsyncRead + Send>>) -> Self {
-        Self {
-            stdout,
-            digest: Sha256::new(),
-            bytes: 0,
-        }
+        Self { stdout, bytes: 0 }
     }
 }
 
 /// What passed, once the stream is over.
 struct Tally {
     bytes: u64,
-    sha256: String,
 }
 
 impl Tally {
@@ -471,13 +463,6 @@ impl Tally {
             artifact.name,
             self.bytes,
             artifact.size
-        );
-        ensure!(
-            self.sha256.eq_ignore_ascii_case(&artifact.sha256),
-            "{} arrived with SHA-256 {}, and the pod's manifest says {}",
-            artifact.name,
-            self.sha256,
-            artifact.sha256
         );
         Ok(())
     }
@@ -496,9 +481,7 @@ impl AsyncRead for Body {
         let mut passing = lock(&self.0);
         let before = buf.filled().len();
         ready!(passing.stdout.as_mut().poll_read(cx, buf))?;
-        let passed = &buf.filled()[before..];
-        passing.digest.update(passed);
-        passing.bytes += passed.len() as u64;
+        passing.bytes += (buf.filled().len() - before) as u64;
         Poll::Ready(Ok(()))
     }
 }
@@ -519,10 +502,8 @@ impl Body {
                 break;
             }
         }
-        let mut passing = lock(&self.0);
         Ok(Tally {
-            bytes: passing.bytes,
-            sha256: hex::encode(std::mem::take(&mut passing.digest).finalize()),
+            bytes: lock(&self.0).bytes,
         })
     }
 }
@@ -589,7 +570,6 @@ mod tests {
         Artifact {
             name: "p-1-1-x86_64.pkg.tar.zst".to_string(),
             size: bytes.len() as u64,
-            sha256: hex::encode(Sha256::digest(bytes)),
         }
     }
 
@@ -615,10 +595,6 @@ mod tests {
         let short = body(b"01234").finish(10).await.unwrap();
         let message = short.check(&expected).unwrap_err().to_string();
         assert!(message.contains("5 bytes"), "{message}");
-
-        let other = body(b"0123456780").finish(10).await.unwrap();
-        let message = other.check(&expected).unwrap_err().to_string();
-        assert!(message.contains("SHA-256"), "{message}");
 
         let long = body(b"0123456789 and more").finish(10).await;
         assert!(long.is_err());

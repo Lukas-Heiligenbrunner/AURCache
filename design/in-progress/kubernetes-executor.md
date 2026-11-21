@@ -674,8 +674,8 @@ the pod to the server as one pipe:
 1. After the build container exits, the dispatcher execs
    `aurcache-build-agent manifest --work /work` in `hold`. It answers with
    the report and a manifest, as JSON: for every regular file in `/work/pkg`
-   whose name passes `is_artifact`, opened with `O_NOFOLLOW`, its name, its
-   size and its SHA-256. `pkg/` and `out/` are opened from `/work`'s handle
+   whose name passes `is_artifact`, opened with `O_NOFOLLOW`, its name and
+   its size. `pkg/` and `out/` are opened from `/work`'s handle
    without following a link either: root in the build container could have
    made either one, and what it points at is not the build's. Nothing is
    running in the build container by then, so the files cannot change
@@ -688,9 +688,14 @@ the pod to the server as one pipe:
    takes them, so the pod is slowed to the server's pace and the dispatcher
    holds a few kilobytes at a time: kube's bounded stdout pipe and one
    request chunk.
-3. As the bytes pass, the dispatcher counts and hashes them. An upload only
-   counts when the server accepted it, the exec ended cleanly, and the count
-   and digest match the manifest.
+3. As the bytes pass, the dispatcher counts them. An upload only counts
+   when the server accepted it, the exec ended cleanly, and the count matches
+   the manifest. There is no digest: the files cannot change once the build
+   container has ended, and every hop of the stream (kubelet, API server,
+   dispatcher) is a byte stream, over TLS between machines, whose failures
+   cut it short or end it, which the count and the exec's own status catch.
+   A digest would read every package twice in the pod to check nothing
+   more.
 
 What the server's route needs was checked against
 `aurcache-api/src/worker.rs` (`job_artifact`), and it already fits:
@@ -700,14 +705,14 @@ What the server's route needs was checked against
 | files per request | one; the name is the last path segment |
 | body | the raw file, streamed to the server's staging directory as it arrives; no multipart |
 | size up front | optional: with `Content-Length`, a file over the package's `max_artifact_size` is refused before any of it is sent (`413`). The manifest supplies it |
-| digest | none asked for, before or after. The SHA-256 here is the dispatcher's own check on a path with three hops in it (kubelet, API server, dispatcher), not something the server sees |
+| digest | none asked for, before or after |
 | who may | the worker holding the build `ACTIVE`: the dispatcher's own identity |
 
 So streaming needs **no protocol change**: no new field, no new route.
 
 When it goes wrong: a file the server refuses for what it is (`400`, `413`)
 fails the build, as on every worker (`PackagesRefused`). Anything else (a
-broken exec stream, a short read, a digest that does not match, a server
+broken exec stream, a short read, a count that does not match, a server
 that restarted and asked the worker to register again, which a streamed body
 cannot be replayed through) is retried once from a fresh `send`, which
 overwrites the staged file; a second failure reports the build
@@ -1157,7 +1162,7 @@ each is run. The layers:
   state on cue and whose `exec` is a pair of pipes: a build that succeeds
   and streams two packages, a cancel, a pod that never schedules, an
   `OOMKilled` container, an eviction, a log stream that breaks and resumes,
-  a digest that does not match. kube's client can also be built over a
+  a send that comes up short. kube's client can also be built over a
   `tower` service with canned HTTP responses, but an exec is a WebSocket
   upgrade, which that cannot stand in for.
 - **The agent in a plain container**, with the pod's security context
