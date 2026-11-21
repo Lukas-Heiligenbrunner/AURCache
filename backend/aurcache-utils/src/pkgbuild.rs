@@ -28,8 +28,8 @@ pub fn fix_source_urls(content: &str) -> String {
 /// What the parse may do is stated here; how that is enforced is entirely the
 /// sandbox's business (its `parse` profile). The parse reads its PKGBUILD and
 /// nothing under `private`, writes nothing, cannot reach the processes around
-/// it, sees none of this process's environment, and touches the network only
-/// when `network` is on.
+/// it, sees none of this process's environment, touches the network only
+/// when `network` is on, and never opens a vsock socket.
 #[derive(Debug, Clone)]
 pub(crate) struct Bridge {
     sandbox: PathBuf,

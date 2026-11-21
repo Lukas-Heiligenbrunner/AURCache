@@ -99,6 +99,35 @@ impl Access {
     }
 }
 
+/// Say at startup whether builds can open vsock sockets.
+///
+/// [`SCRIPT`] starts every container of a build under `aurcache-sandbox
+/// container`, which refuses `AF_VSOCK` with a seccomp filter. Where no
+/// filter can be installed -- an emulated worker, whose qemu refuses one --
+/// the sandbox warns and runs the container anyway, so that warning is only
+/// in each build's log. This runs the same profile once, here, so the
+/// operator sees it where the worker starts. A sandbox that refuses to run,
+/// or knows no such profile, would fail every build, and refuses the start.
+pub async fn check_vsock() -> anyhow::Result<()> {
+    let output = tokio::process::Command::new("aurcache-sandbox")
+        .args(["container", "--", "true"])
+        .output()
+        .await
+        .context("cannot run aurcache-sandbox, which every build runs under")?;
+    let said = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        anyhow::bail!(
+            "aurcache-sandbox cannot start a build's containers ({}): {}",
+            output.status,
+            said.trim()
+        );
+    }
+    if !said.trim().is_empty() {
+        tracing::warn!("{}", said.trim());
+    }
+    Ok(())
+}
+
 /// Build the [`SCRIPT`] argv for a per-package build.
 ///
 /// No `systemd-run` wrapper: the worker places the build in a cgroup of its own

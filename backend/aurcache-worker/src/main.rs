@@ -63,10 +63,12 @@ async fn main() -> Result<()> {
         }
         Command::BuildOnce { path, flags } => {
             build::check_script().await?;
+            build::check_vsock().await?;
             oneshot::build_once(&cfg, &path, &flags).await
         }
         Command::Run => {
             build::check_script().await?;
+            build::check_vsock().await?;
             run(core, cfg).await
         }
     }

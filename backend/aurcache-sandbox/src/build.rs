@@ -39,6 +39,12 @@
 //!   filesystem, and reading is not how one build corrupts another; what must
 //!   stay secret is short and known. With no list, reads are not restricted.
 //!
+//! - **Sockets**: every family but `AF_VSOCK`, and no io_uring (the
+//!   `NO_VSOCK` filter of `seccomp.rs`). A download needs the network, which
+//!   is the build's network policy to limit; vsock is outside it, since no
+//!   network namespace confines it and no firewall sees it. An emulated
+//!   process cannot install the filter, and runs after a warning instead.
+//!
 //! What this cannot do is protect a secret already in the process environment:
 //! a PKGBUILD reads it without touching the filesystem. makechrootpkg reaches
 //! here through `sudo`, which passes on only what it is told to preserve.
@@ -72,7 +78,8 @@ const PROTECTED_PATHS_FILE: &str = "/etc/aurcache/sandbox-protected";
 const USAGE: &str = "usage: aurcache-sandbox --allow-build-env -- PROGRAM [ARGS]...\n       \
                      aurcache-sandbox parse --pkgbuild FILE [--private PATH]... [--network] \
                      -- PROGRAM [ARGS]...\n       \
-                     aurcache-sandbox offline -- PROGRAM [ARGS]...";
+                     aurcache-sandbox offline -- PROGRAM [ARGS]...\n       \
+                     aurcache-sandbox container -- PROGRAM [ARGS]...";
 
 struct Request {
     program: OsString,
@@ -143,6 +150,11 @@ fn run(request: &Request) -> Result<Infallible, Failure> {
         crate::read_grants_excluding(&protected, crate::list_dir)
     };
     restrict(&writable_dirs(), &read).map_err(|e| Failure::Unconfined(e.to_string()))?;
+    // After Landlock, which has set no_new_privs.
+    let vsock = crate::seccomp::refuse_vsock().map_err(Failure::Unconfined)?;
+    if let Some(warning) = vsock.warning() {
+        eprintln!("{warning}");
+    }
 
     let err = std::process::Command::new(&request.program)
         .args(&request.args)

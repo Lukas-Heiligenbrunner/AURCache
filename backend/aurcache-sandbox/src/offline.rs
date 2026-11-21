@@ -165,7 +165,7 @@ fn run(request: &Request) -> Result<Infallible, String> {
     // The namespace before the capabilities go: creating one takes
     // CAP_SYS_ADMIN.
     let netns = enter_netns();
-    let seccomp = install_seccomp();
+    let seccomp = install_seccomp()?;
     drop_capabilities()?;
     let landlock = layer_landlock()?;
     let layers = Layers {
@@ -196,19 +196,26 @@ fn enter_netns() -> Layer {
 }
 
 /// The socket-family filter, where this architecture has one and this
-/// process can install it.
-fn install_seccomp() -> Layer {
+/// process can install it. A filter the kernel refuses for itself is a
+/// refusal of the install, not a layer that did not apply.
+fn install_seccomp() -> Result<Layer, String> {
     let Some(arch) = seccomp::native() else {
-        return Layer::Unavailable("none is written for this architecture".into());
+        return Ok(Layer::Unavailable(
+            "none is written for this architecture".into(),
+        ));
     };
-    match seccomp::install(&seccomp::program(&arch)) {
-        Ok(()) => Layer::Applied,
+    match seccomp::install_checked(&seccomp::program(&arch, &seccomp::OFFLINE)) {
+        Ok(()) => Ok(Layer::Applied),
         // qemu's user-mode emulation refuses every filter: none it could
         // install would describe the system calls the host actually sees.
-        Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {
-            Layer::Unavailable(format!("{e}; an emulated process cannot install one"))
-        }
-        Err(e) => Layer::Unavailable(e.to_string()),
+        Err(seccomp::NotInstalled::Unsupported(e)) => Ok(Layer::Unavailable(format!(
+            "{e}; this process can install no filter, as an emulated one cannot"
+        ))),
+        Err(seccomp::NotInstalled::Invalid(e)) => Err(format!(
+            "the kernel refused the offline filter itself ({e}), though it takes \
+             others: the filter is malformed"
+        )),
+        Err(seccomp::NotInstalled::Other(e)) => Ok(Layer::Unavailable(e.to_string())),
     }
 }
 

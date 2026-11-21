@@ -466,6 +466,18 @@ EOF
         # the container's own `--drop-capability=`: one started without
         # CAP_SYS_ADMIN is left the mount calls, and every other refuses them.
         #
+        # Every container is started under `aurcache-sandbox container`, which
+        # installs a seccomp filter here, on the host, that systemd-nspawn and
+        # everything in the container inherit: no AF_VSOCK socket, through any
+        # ABI the kernel runs, and no io_uring, which would create one without
+        # `socket(2)`. vsock is no network namespace's and no firewall sees it,
+        # so on a worker in a virtual machine it would reach the hypervisor's
+        # vsock services and the machine's own vsock listeners, past the
+        # build's network policy. Why not nspawn's own
+        # `--restrict-address-families=~AF_VSOCK`: see "The container" in
+        # design/proposed/build-runner.md. An emulated worker, whose qemu installs no filter, starts the
+        # container anyway, with a warning in the build's log.
+        #
         # `--restrict-address-families=`: systemd-nspawn currently permits
         # every socket address family and warns, in every build log, that a
         # future version will default to AF_INET, AF_INET6 and AF_UNIX only.
@@ -529,7 +541,10 @@ _aurcache_direct=0
 _aurcache_setarch=
 arch-nspawn() {
 \tlocal _aurcache_dir=$1 _aurcache_arg _aurcache_mount=('--system-call-filter=~@mount')
+\tlocal _aurcache_confine
 \tshift
+\t_aurcache_confine=$(command -v aurcache-sandbox) ||
+\t\tdie "aurcache-sandbox is needed to start a container"
 \t# nspawn's own options come first; the command to run starts at the
 \t# first argument that is not one.
 \tfor _aurcache_arg; do
@@ -540,7 +555,8 @@ arch-nspawn() {
 \t\tfi
 \tdone
 \tif (( _aurcache_direct )); then
-\t\t${_aurcache_setarch:+setarch "$_aurcache_setarch"} systemd-nspawn \\
+\t\t"$_aurcache_confine" container -- \\
+\t\t\t${_aurcache_setarch:+setarch "$_aurcache_setarch"} systemd-nspawn \\
 \t\t\t--quiet \\
 \t\t\t--directory="$(readlink -f "$_aurcache_dir")" \\
 \t\t\t--setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/bin \\
@@ -551,7 +567,8 @@ arch-nspawn() {
 \t\t\t--timezone=off \\
 \t\t\t"${_aurcache_nspawn_args[@]}" "${_aurcache_mount[@]}" "$@"
 \telse
-\t\tcommand arch-nspawn "$_aurcache_dir" "${_aurcache_nspawn_args[@]}" "${_aurcache_mount[@]}" "$@"
+\t\t"$_aurcache_confine" container -- \\
+\t\t\tarch-nspawn "$_aurcache_dir" "${_aurcache_nspawn_args[@]}" "${_aurcache_mount[@]}" "$@"
 \tfi
 }
 

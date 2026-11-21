@@ -50,6 +50,7 @@ hook:
 | `AURCACHE_*` and `--interface` across `check_root`'s re-exec | sudo drops the rest; the argument was shifted |
 | Landlock around `source PKGBUILD` | the PKGBUILD runs on the host there too |
 | `arch-nspawn` wrapper: `--keep-unit`, `--restrict-address-families=` | the container escaped the build's cgroup; a systemd default is changing |
+| `arch-nspawn` wrapper: every container under `aurcache-sandbox container` | a seccomp filter refusing `AF_VSOCK` and io_uring, which no network namespace or policy holds |
 | skip non-regular files in `pkgdest`, `srcpkgdest`, `logdest`; `chown -h` (three patches) | a build could make host root `chown` any host file, see below |
 
 Each patch must apply exactly once, or the image build fails. That is the
@@ -226,6 +227,20 @@ One `systemd-nspawn` invocation per container step, from a fixed list:
 cgroup the runner is started in, so the container stays inside it, and
 Stop and `memory.peak` cover it. That retires both the patch and
 `docker/nspawn-wrapper.sh`.
+
+nspawn is started with the sandbox's `NO_VSOCK` seccomp filter already
+installed, as `aurcache-sandbox container` does for the patched script: no
+`AF_VSOCK` socket through any ABI the kernel runs, and no io_uring.
+
+This is the one place that says why nspawn's own
+`--restrict-address-families=~AF_VSOCK` is no substitute. nspawn accepts it
+(from systemd 261) and refuses the native `socket(AF_VSOCK)`, but systemd's
+`seccomp_restrict_address_families` skips every architecture that has
+`socketcall`, x86 among them, and nspawn's allowlist includes `@aio`. So,
+checked with systemd 262 in a container started with the option, an i386
+`socket` and `socketcall(SYS_SOCKET)` through `int 0x80` and io_uring's
+`IORING_OP_SOCKET` all still open one. It also needs systemd 261, while a
+filter installed before nspawn starts holds whatever nspawn's version.
 
 ### Sources are fetched inside the container
 

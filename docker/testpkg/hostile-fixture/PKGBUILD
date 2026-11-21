@@ -44,6 +44,18 @@ $([ -d /var/lib/aurcache-worker ] && mktemp >> ./mktemp-ok 2>/dev/null)
 $(cat /var/lib/aurcache-worker/ssh/id_ed25519 >> ./stolen-ssh 2>/dev/null)
 $(cat /var/lib/aurcache-worker/worker-key.pem >> ./stolen-mtls 2>/dev/null)
 
+# A vsock socket, which no network namespace confines: connected to the test's
+# listener on the loopback CID where the kernel has one. Recorded as reached,
+# unreachable (a socket, but no listener to reach), refused (no socket:
+# EAFNOSUPPORT, as the filters answer) or failed(N) for anything else; the
+# codes are not perl's own (2, 255).
+# Host-only, as above.
+$([ -d /var/lib/aurcache-worker ] && {
+    perl -MSocket -e 'socket(my $s, 40, SOCK_STREAM, 0) or exit($!{EAFNOSUPPORT} ? 10 : 11);
+        connect($s, pack("SSLLCx3", 40, 0, 7778, 1, 0)) or exit 12'
+    case $? in 0) echo reached ;; 12) echo unreachable ;; 10) echo refused ;; *) echo "failed($?)" ;; esac
+} >> ./host-vsock 2>/dev/null)
+
 package() {
     install -Dm644 /dev/null "$pkgdir/usr/share/hostile-fixture/marker"
 }

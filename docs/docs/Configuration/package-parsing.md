@@ -21,7 +21,12 @@ A parse:
 - cannot write the server's files;
 - cannot signal or inspect the processes around it;
 - sees none of the server's environment;
-- cannot reach the Docker socket.
+- cannot reach the Docker socket;
+- cannot open a vsock (`AF_VSOCK`) socket, which no network namespace
+  confines and no firewall sees: on a server in a virtual machine, one would
+  reach the hypervisor's vsock services and the machine's own vsock
+  listeners. Nor can it use io_uring, which can open one without the `socket`
+  call. This holds with `parse_network` too.
 
 How that is enforced depends on the install, and only the sandbox knows:
 
@@ -36,6 +41,13 @@ How that is enforced depends on the install, and only the sandbox knows:
 - **A native install** runs the server unprivileged, so Landlock is all there
   is: it needs Linux 6.12 or newer with Landlock enabled, and the server
   refuses to parse otherwise.
+
+Either way, vsock and io_uring are refused by a seccomp filter, installed
+last. A server run emulated (an image for another architecture, through
+qemu) cannot install one, and parses with vsock open: the sandbox warns on
+each parse's stderr, which the server shows only when a parse fails, so
+nothing in the server's log says so. In a virtual machine with a vsock
+device, run the image built for the machine's own architecture.
 
 Denying TCP is hardening rather than a boundary: Landlock covers TCP only, and
 only from Linux 6.7, so on Synology, whose kernels predate Landlock, a parse
