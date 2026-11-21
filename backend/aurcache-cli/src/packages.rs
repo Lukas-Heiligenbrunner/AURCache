@@ -3,7 +3,7 @@
 use crate::builds::{WatchScope, follow_trigger, list_scoped_builds};
 use crate::cli::{
     AddPackageArgs, DependencyCommand, ListPackagesArgs, OutputFormat, PackagesCommand, PatchArg,
-    PatchPackageArgs, UpdatePackageArgs,
+    PatchPackageArgs, UpdatePackageArgs, UploadPackageArgs,
 };
 use crate::output::{
     Progress, bool_label, follow_job, join_or_dash, option_text, print_done_message, print_table,
@@ -15,11 +15,13 @@ use aurcache_client::{
     AddPackageRequest, AddPackagesRequest, AurCacheClient, BulkAddAccepted, BulkAddEntry,
     BulkAddOutcome, BulkAddProgress, CandidateSource, DependencyOptions, ExtendedPackage,
     GitSourceSpec, PackageDependency, PackagePatch, PackageSource, ReplacementVerdict,
-    SimplePackage, SourceData, UpdatePackage, looks_like_git_url,
+    SimplePackage, SourceData, UpdatePackage, UploadedBuild, looks_like_git_url,
 };
+use aurcache_common::build_state::BuildState;
 use dialoguer::Confirm;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 
 pub(crate) async fn run_packages_command(
     client: &AurCacheClient,
@@ -32,6 +34,7 @@ pub(crate) async fn run_packages_command(
         PackagesCommand::Add(args) => add_package_command(client, format, args).await,
         PackagesCommand::Update(args) => update_package_command(client, format, args).await,
         PackagesCommand::Patch(args) => patch_package_command(client, format, args).await,
+        PackagesCommand::Upload(args) => upload_package_command(client, format, args).await,
         PackagesCommand::Dep { command } => run_dependency_command(client, format, command).await,
         PackagesCommand::Rm { pkgbases } => {
             remove_packages_command(client, format, &pkgbases).await
@@ -321,6 +324,67 @@ pub(crate) async fn update_package_command(
     })?;
     let scope = scope.map(|scope| scope.triggered(&args.pkgbase, queued.iter().copied()));
     follow_trigger(client, format, &args.wait, scope).await
+}
+
+pub(crate) async fn upload_package_command(
+    client: &AurCacheClient,
+    format: OutputFormat,
+    args: UploadPackageArgs,
+) -> Result<()> {
+    check_upload_files(&args.files)?;
+    // A request refused for its token is answered without reading its body,
+    // so a client still sending a large one sees the connection close rather
+    // than the refusal: ask about the token first.
+    client
+        .user_info()
+        .await
+        .context("checking the token before uploading")?;
+    let uploaded = client
+        .upload_package(&args.pkgbase, args.platform.as_deref(), &args.files)
+        .await?;
+    render(format, &uploaded, print_uploaded)?;
+    upload_result(&uploaded)
+}
+
+/// Refuse what the server would refuse by name alone, before sending any of
+/// it: the server can only answer once it has read the whole body.
+fn check_upload_files(files: &[PathBuf]) -> Result<()> {
+    let mut names = Vec::with_capacity(files.len());
+    for path in files {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            bail!("{} names no file", path.display());
+        };
+        names.push(name);
+    }
+    aurcache_common::upload::check_names(names).map_err(|e| anyhow!(e))
+}
+
+fn print_uploaded(uploaded: &UploadedBuild) {
+    let UploadedBuild {
+        pkgbase,
+        number,
+        platform,
+        version,
+        status,
+    } = uploaded;
+    println!(
+        "{pkgbase}/{number}: {version} for {platform}, {}",
+        status.label()
+    );
+}
+
+/// Fail when the upload's build did, pointing at its log, which says why.
+fn upload_result(uploaded: &UploadedBuild) -> Result<()> {
+    match uploaded.status {
+        BuildState::Failed => bail!(
+            "publishing {}/{} failed; `aurcli builds output {}/{}` says why",
+            uploaded.pkgbase,
+            uploaded.number,
+            uploaded.pkgbase,
+            uploaded.number
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// The numbers come back bare, so they are printed against the package they
@@ -641,5 +705,33 @@ pub(crate) fn describe_source(source: &PackageSource) -> String {
             )
         }
         PackageSource::Upload(_) => "upload".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whatever directory a file is in, the name the server sees is its own.
+    #[test]
+    fn an_upload_is_checked_by_name_before_it_is_sent() {
+        let files = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
+        assert!(
+            check_upload_files(&files(&[
+                "/tmp/out/hello-1.0-1-x86_64.pkg.tar.zst",
+                "hello-1.0-1-x86_64.pkg.tar.zst.sig",
+            ]))
+            .is_ok()
+        );
+        let refusal = |names: &[&str]| check_upload_files(&files(names)).unwrap_err().to_string();
+        assert!(refusal(&["PKGBUILD"]).contains("PKGBUILD"));
+        assert!(refusal(&["/"]).contains("names no file"));
+        assert!(
+            refusal(&[
+                "a/hello-1.0-1-x86_64.pkg.tar.zst",
+                "b/hello-1.0-1-x86_64.pkg.tar.zst",
+            ])
+            .contains("twice")
+        );
     }
 }

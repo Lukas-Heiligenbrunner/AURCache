@@ -18,9 +18,14 @@ aurcache-common = { workspace = true }
 anyhow = { workspace = true }
 # Zero-copy uploads: `restore` takes `Bytes` straight into the request body.
 bytes = "1"
-reqwest = { workspace = true, features = ["json", "query"] }
+reqwest = { workspace = true, features = ["json", "query", "multipart"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+
+# Uploading package files from disk streams them, which a browser has no
+# paths for: native only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true, features = ["stream"] }
 
 [dev-dependencies]
 # Pinning the query strings the list helpers send.

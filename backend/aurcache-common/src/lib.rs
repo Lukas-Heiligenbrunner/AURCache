@@ -25,6 +25,8 @@ pub mod source;
 pub mod ssh_key;
 /// Sizes and durations as configuration writes them (`40G`, `3h`).
 pub mod units;
+/// What an upload of packages built elsewhere may carry, by name.
+pub mod upload;
 /// The version string binaries report: their crate release, plus the commit
 /// when the build is not exactly that release.
 pub mod version;

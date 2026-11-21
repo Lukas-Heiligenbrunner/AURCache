@@ -127,3 +127,14 @@ worker](../workers/docker.md#other-architectures).
 
 The hybrid image is for keeping an existing setup running. When convenient,
 move to a server and a separate worker; see [Migrating](../workers/hybrid.md#migrating).
+
+## Going back to an earlier release
+
+Restoring the backup taken before upgrading is the way back from any release.
+Running an earlier server on the database a later one left is not supported,
+and some changes make it fail outright:
+
+- **Uploaded builds.** Once a package has been
+  [uploaded](../cli/packages.md#uploading-packages-built-elsewhere), its
+  build row records that it was uploaded, which a server from before uploads
+  cannot read: anything that reads that build fails there.

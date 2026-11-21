@@ -360,6 +360,16 @@ events! {
         version: Option<String>,
     },
 
+    /// Packages built elsewhere were uploaded, as a build that is on its way
+    /// into the repository.
+    BuildUploaded => ("build.uploaded", "Builds", "Packages uploaded") {
+        build: BuildRef,
+        version: String,
+        /// The package files it carried, signatures and makepkg's `-debug`
+        /// packages left out.
+        files: Vec<String>,
+    },
+
     /// A worker reported a build finished, and the report was refused -- which
     /// is how a build that worked becomes one that failed.
     BuildCompletionRejected => ("build.completion_rejected", "Builds", "Finish report refused") {
@@ -775,6 +785,7 @@ impl Event {
             | Self::WorkerConfigChanged { .. }
             | Self::WorkerSettingsSaved { .. }
             | Self::BuildPublished { .. }
+            | Self::BuildUploaded { .. }
             | Self::BuildCancelled { .. }
             | Self::BuildDeleted { .. }
             | Self::PackageChanged { .. }
@@ -1087,6 +1098,15 @@ impl Event {
             Self::BuildSucceeded { build, worker } => {
                 vec![entity(build), text(" finished on "), entity(worker)]
             }
+            Self::BuildUploaded {
+                build,
+                version,
+                files,
+            } => vec![
+                text("uploaded "),
+                entity(build),
+                text(format!(": {version}, {}", files.join(", "))),
+            ],
             Self::WorkerRegistered { worker, version } => {
                 let mut out = vec![text("worker "), entity(worker), text(" checked in")];
                 if let Some(version) = version {
@@ -1470,6 +1490,11 @@ mod tests {
             Event::BuildSucceeded {
                 build: build(),
                 worker: worker(),
+            },
+            Event::BuildUploaded {
+                build: build(),
+                version: "1.0-1".to_string(),
+                files: vec!["foo-1.0-1-x86_64.pkg.tar.zst".to_string()],
             },
             Event::WorkerRegistered {
                 worker: worker(),

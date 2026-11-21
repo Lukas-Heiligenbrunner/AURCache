@@ -37,6 +37,10 @@ aurcache-utils = {path = "../aurcache-utils"}
 pacman-mirrors = {path = "../pacman-mirrors"}
 aurcache-common = {path = "../aurcache-common", features = ["openapi", "digest"]}
 rocket_async_compression = "0.6.1"
+# Uploaded packages arrive as one multipart request, streamed to disk part by
+# part. Rocket's own form parser buffers through its global limits instead.
+multer = "3.1.0"
+tokio-util = { version = "0.7.20", features = ["io"] }
 
 [features]
 default = []
@@ -56,3 +60,5 @@ aurcache-client = { path = "../aurcache-client" }
 # The repository tests serve a signing repository's key.
 aurcache-signing = { path = "../aurcache-signing" }
 tempfile = { workspace = true }
+tar = { workspace = true }
+zstd = "0.14"

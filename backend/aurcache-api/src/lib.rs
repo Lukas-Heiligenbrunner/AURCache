@@ -18,5 +18,6 @@ mod settings;
 pub mod spa;
 mod stats;
 pub mod ui_cache;
+mod upload;
 mod utils;
 mod worker;

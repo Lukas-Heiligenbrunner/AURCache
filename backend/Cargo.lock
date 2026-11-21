@@ -701,6 +701,7 @@ dependencies = [
  "aurcache-utils",
  "hex",
  "jiff 1.0.1",
+ "multer",
  "pacman-mirrors",
  "rand 0.10.4",
  "rand_core 0.10.1",
@@ -712,13 +713,16 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "utoipa",
  "utoipa-redoc",
  "utoipa-scalar",
  "wasm-bindgen-cli-support",
+ "zstd",
 ]
 
 [[package]]
@@ -5030,6 +5034,7 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",

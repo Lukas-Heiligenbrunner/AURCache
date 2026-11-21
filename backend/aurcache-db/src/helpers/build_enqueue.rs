@@ -149,6 +149,73 @@ pub async fn enqueue_build_if_missing<C: ConnectionTrait + sea_orm::TransactionT
     )))
 }
 
+/// What [`record_upload`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadSlot {
+    /// The upload's build, inserted straight into `PUBLISHING`.
+    Recorded(builds::Model),
+    /// Nothing inserted: this build of the package on that platform has not
+    /// settled yet, and an upload does not go past it.
+    Busy(builds::Model),
+}
+
+/// Insert the build an upload becomes: already `PUBLISHING`, since everything
+/// a worker would do for it is done, with no worker and no lease. The
+/// package's status follows, in `txn`.
+///
+/// The partial unique index over [`BuildState::IN_PROGRESS`] is what refuses
+/// a second one, as it refuses a second queued build: [`UploadSlot::Busy`]
+/// names the build in the way.
+pub async fn record_upload<C: ConnectionTrait>(
+    txn: &C,
+    pkg_id: i32,
+    platform: Platform,
+    version: &str,
+    now: i64,
+) -> Result<UploadSlot, DbErr> {
+    // The same two conflicts as in `enqueue_build_if_missing`, told apart the
+    // same way.
+    for _ in 0..NUMBER_RACE_ATTEMPTS {
+        if let Some(pending) = crate::helpers::builds::pending_build(txn, pkg_id, platform).await? {
+            return Ok(UploadSlot::Busy(pending));
+        }
+        let insert = Query::insert()
+            .into_table(builds::Entity)
+            .columns([
+                builds::Column::PkgId,
+                builds::Column::Status,
+                builds::Column::StartTime,
+                builds::Column::Platform,
+                builds::Column::Version,
+                builds::Column::Number,
+                builds::Column::Trigger,
+            ])
+            .values([
+                pkg_id.into(),
+                BuildState::Publishing.into(),
+                now.into(),
+                platform.into(),
+                version.to_owned().into(),
+                next_build_number_expr(pkg_id),
+                BuildTrigger::Upload.as_i32().into(),
+            ])
+            .map_err(|e| DbErr::Custom(e.to_string()))?
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .to_owned();
+        if txn.execute(&insert).await?.rows_affected() == 1 {
+            let build = crate::helpers::builds::pending_build(txn, pkg_id, platform)
+                .await?
+                .ok_or_else(|| DbErr::Custom("the uploaded build vanished".to_string()))?;
+            refresh_package_status(txn, pkg_id).await?;
+            return Ok(UploadSlot::Recorded(build));
+        }
+    }
+    Err(DbErr::Custom(format!(
+        "Could not assign a build number for package {pkg_id} on platform {platform} \
+         after {NUMBER_RACE_ATTEMPTS} attempts"
+    )))
+}
+
 /// Promote an existing `WAITING_FOR_DEPS` build to `ENQUEUED` so that it can be started.
 ///
 /// Returns the updated build row if a `WAITING_FOR_DEPS` build was found and promoted,
@@ -266,6 +333,43 @@ mod build_number_tests {
 #[cfg(test)]
 mod transaction_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_upload_is_recorded_publishing_and_a_second_waits() {
+        let db = crate::testing::memory_db().await;
+        let pkg = crate::testing::package("hello").insert(&db).await;
+        let UploadSlot::Recorded(build) = record_upload(&db, pkg.id, Platform::X86_64, "1-1", 100)
+            .await
+            .unwrap()
+        else {
+            panic!("the first upload is recorded");
+        };
+        assert_eq!(build.status, BuildState::Publishing);
+        assert_eq!(build.trigger, BuildTrigger::Upload);
+        assert_eq!(build.number, 1);
+        assert_eq!(build.worker_id, None);
+        let status = crate::prelude::Packages::find_by_id(build.pkg_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .status;
+        assert_eq!(status, BuildState::Publishing);
+
+        assert_eq!(
+            record_upload(&db, pkg.id, Platform::X86_64, "1-2", 101)
+                .await
+                .unwrap(),
+            UploadSlot::Busy(build)
+        );
+        // Another platform is another slot.
+        assert!(matches!(
+            record_upload(&db, pkg.id, Platform::Aarch64, "1-1", 102)
+                .await
+                .unwrap(),
+            UploadSlot::Recorded(_)
+        ));
+    }
 
     #[tokio::test]
     async fn a_failed_package_refresh_rolls_back_each_queue_mutation() {

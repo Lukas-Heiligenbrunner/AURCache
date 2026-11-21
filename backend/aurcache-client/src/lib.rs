@@ -28,6 +28,7 @@ pub use aurcache_common::api::package::{
 };
 pub use aurcache_common::api::package::{
     AurNotFoundPackage, AurPackage, PackagePatch, PackageSource, UpdatePackage, UploadPackage,
+    UploadedBuild,
 };
 pub use aurcache_common::api::package::{
     CandidateSource, DependencyCandidate, DependencyOptions, ReplaceDependency, ReplacementVerdict,
@@ -94,6 +95,20 @@ const CLIENT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// How long a dump may take to travel either way, the restore upload and the
 /// download alike: up to 64 MiB on a slow link.
 const CLIENT_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How long uploading `bytes` of package files may take: the dump's deadline,
+/// plus a second per MiB, which a link slower than 1 MiB/s would still need
+/// more than.
+fn package_upload_timeout(bytes: u64) -> std::time::Duration {
+    CLIENT_UPLOAD_TIMEOUT + std::time::Duration::from_secs(bytes >> 20)
+}
+
+/// One file of a package upload, already read: its name, as the server will
+/// check it, and its contents.
+pub struct UploadFile {
+    pub filename: String,
+    pub contents: bytes::Bytes,
+}
 
 /// Async HTTP client for the AURCache API.
 ///
@@ -353,6 +368,71 @@ impl AurCacheClient {
         })
         .send_empty()
         .await
+    }
+
+    /// Publishes package files built elsewhere as a build of the package
+    /// `pkgbase`.
+    ///
+    /// `files` are the package files of one build and any detached `.sig`
+    /// beside them, streamed from disk. `platform` is needed only when every
+    /// package is `arch = any`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn upload_package(
+        &self,
+        pkgbase: &str,
+        platform: Option<&str>,
+        files: &[std::path::PathBuf],
+    ) -> Result<UploadedBuild> {
+        let mut form = reqwest::multipart::Form::new();
+        let mut total = 0;
+        for path in files {
+            let part = reqwest::multipart::Part::file(path)
+                .await
+                .with_context(|| format!("could not open {}", path.display()))?;
+            total += std::fs::metadata(path).map_or(0, |m| m.len());
+            form = form.part("file", part);
+        }
+        self.send_upload(pkgbase, platform, form, total).await
+    }
+
+    /// [`Self::upload_package`] for files already in memory, which is all a
+    /// browser has.
+    pub async fn upload_package_files(
+        &self,
+        pkgbase: &str,
+        platform: Option<&str>,
+        files: Vec<UploadFile>,
+    ) -> Result<UploadedBuild> {
+        let mut form = reqwest::multipart::Form::new();
+        let mut total = 0;
+        for UploadFile { filename, contents } in files {
+            total += contents.len() as u64;
+            // Handed over as they are rather than copied into the request.
+            let part = reqwest::multipart::Part::stream(contents);
+            form = form.part("file", part.file_name(filename));
+        }
+        self.send_upload(pkgbase, platform, form, total).await
+    }
+
+    /// Send an upload's `form`, `total` bytes of files, to `pkgbase`.
+    async fn send_upload(
+        &self,
+        pkgbase: &str,
+        platform: Option<&str>,
+        form: reqwest::multipart::Form,
+        total: u64,
+    ) -> Result<UploadedBuild> {
+        #[derive(Serialize)]
+        struct Upload<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            platform: Option<&'a str>,
+        }
+        self.request(Method::POST, &format!("/package/{pkgbase}/upload"))
+            .query(&Upload { platform })
+            .with(|request| request.multipart(form))
+            .timeout(package_upload_timeout(total))
+            .send_json()
+            .await
     }
 
     /// Removes the direct-request flag from the given package.

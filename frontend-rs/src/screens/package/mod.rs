@@ -85,11 +85,12 @@ fn in_repo_on<'a>(builds: &'a [Build], platform: &str) -> Option<&'a Build> {
 /// ever actually landed.
 ///
 /// Only successful builds count. A failure's duration measures how quickly
-/// something broke, which is a different quantity and usually much shorter.
+/// something broke, which is a different quantity and usually much shorter;
+/// an upload's, how long it took to publish what was built elsewhere.
 fn typical_duration(builds: &[Build]) -> Option<std::time::Duration> {
     let mut durations: Vec<std::time::Duration> = builds
         .iter()
-        .filter(|b| succeeded(b))
+        .filter(|b| succeeded(b) && !b.uploaded)
         .filter_map(Build::elapsed)
         .collect();
 
@@ -570,6 +571,7 @@ mod tests {
             worker_name: None,
             log_size: None,
             waiting_reason: None,
+            uploaded: false,
         }
     }
 
@@ -661,6 +663,26 @@ mod tests {
             sample(1, "x86_64", BuildState::Successful, Some(0), Some(600)),
             sample(2, "x86_64", BuildState::Failed, Some(0), Some(5)),
             sample(3, "x86_64", BuildState::Failed, Some(0), Some(5)),
+        ];
+        assert_eq!(
+            typical_duration(&builds),
+            Some(std::time::Duration::from_secs(600))
+        );
+    }
+
+    /// An upload was built elsewhere: how long it took to publish is not how
+    /// long a build takes.
+    #[test]
+    fn uploads_do_not_count_towards_the_typical_duration() {
+        let mut uploaded = sample(2, "x86_64", BuildState::Successful, Some(0), Some(3));
+        uploaded.uploaded = true;
+        let builds = vec![
+            sample(1, "x86_64", BuildState::Successful, Some(0), Some(600)),
+            uploaded.clone(),
+            Build {
+                number: 3,
+                ..uploaded
+            },
         ];
         assert_eq!(
             typical_duration(&builds),

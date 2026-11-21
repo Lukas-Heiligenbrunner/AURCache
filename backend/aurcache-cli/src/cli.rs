@@ -522,6 +522,12 @@ pub(crate) enum PackagesCommand {
     Update(UpdatePackageArgs),
     /// Partially update package metadata.
     Patch(PatchPackageArgs),
+    /// Publish packages built elsewhere, e.g. with `makechrootpkg`.
+    ///
+    /// The files are one build of an existing package: the package files
+    /// (split packages included) and any detached `.sig` beside them. They
+    /// become a build of the package, published like one a worker built.
+    Upload(UploadPackageArgs),
     /// Inspect and repoint a package's dependencies.
     Dep {
         #[command(subcommand)]
@@ -653,6 +659,23 @@ pub(crate) struct UpdatePackageArgs {
 
     #[command(flatten)]
     pub(crate) wait: WaitOpts,
+}
+
+#[derive(Args, Debug, Clone)]
+pub(crate) struct UploadPackageArgs {
+    /// Package name (pkgbase) the files are a build of: an AUR or git
+    /// package already here. Every file must be among the packages its
+    /// source builds.
+    pub(crate) pkgbase: String,
+
+    /// The package files and their signatures.
+    #[arg(required = true)]
+    pub(crate) files: Vec<PathBuf>,
+
+    /// The platform the build is for, needed only when every package is
+    /// `arch = any`.
+    #[arg(long)]
+    pub(crate) platform: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]

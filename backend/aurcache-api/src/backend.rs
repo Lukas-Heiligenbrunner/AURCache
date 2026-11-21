@@ -69,6 +69,7 @@ pub fn build_api() -> Vec<Route> {
         get_setting,
         patch_setting,
         reset_setting,
-        preview_schedule
+        preview_schedule,
+        crate::upload::upload_package
     ]
 }

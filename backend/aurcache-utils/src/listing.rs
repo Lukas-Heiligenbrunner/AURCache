@@ -4,7 +4,7 @@
 use crate::worker_policy::worker_policy;
 use aurcache_common::api::builds::{BuildSummary, DiskUsage, KeptBuild};
 use aurcache_common::api::waiting::WaitingReason;
-use aurcache_common::build_state::BuildState;
+use aurcache_common::build_state::{BuildState, BuildTrigger};
 use aurcache_db::helpers::builds::latest_successful_version_expr;
 use aurcache_db::helpers::files::total_artifact_size_expr;
 use aurcache_db::helpers::worker_jobs;
@@ -52,6 +52,7 @@ pub fn build_row_select() -> Select<Builds> {
         .column(builds::Column::Platform)
         .column(builds::Column::Size)
         .column(builds::Column::PeakMemory)
+        .column(builds::Column::Trigger)
         .column(builds::Column::DiskChroot)
         .column(builds::Column::DiskWorkdir)
         .column(builds::Column::DiskSources)
@@ -80,6 +81,7 @@ pub struct BuildRow {
     platform: String,
     size: Option<i64>,
     peak_memory: Option<i64>,
+    trigger: BuildTrigger,
     disk_chroot: Option<i64>,
     disk_workdir: Option<i64>,
     disk_sources: Option<i64>,
@@ -124,6 +126,7 @@ impl BuildRow {
             // show. See the field's docs for how `None` differs from `0`.
             log_size: None,
             waiting_reason,
+            uploaded: self.trigger == BuildTrigger::Upload,
         }
     }
 }

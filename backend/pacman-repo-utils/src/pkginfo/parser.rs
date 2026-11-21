@@ -6,7 +6,7 @@ use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 /// Upper bound on a detached signature, mirroring `repo-add`'s own check.
-const MAX_SIGNATURE_BYTES: usize = 16384;
+pub const MAX_SIGNATURE_BYTES: usize = 16384;
 
 /// Upper bound on a `.PKGINFO`, which whoever built the package writes. A real
 /// one is a few KiB.
