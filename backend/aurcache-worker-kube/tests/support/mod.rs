@@ -20,7 +20,7 @@ use aurcache_common::worker::{JobDescriptor, JobVcsSource, MirrorlistOffer};
 use aurcache_worker_container::input::Packed;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{PackagesRefused, Timeout, TimeoutSource};
-use aurcache_worker_kube::cluster::{Admission, Cluster, CreateError, Exec, ExecEnd, Stdin};
+use aurcache_worker_kube::cluster::{Admission, Cluster, CreateError, Exec, ExecEnd, Stdin, Sweep};
 use aurcache_worker_kube::config::{AgentImage, Config, PodExtras, Tunables};
 use aurcache_worker_kube::executor::{Build, KubeExecutor};
 use aurcache_worker_kube::transfer::Uploads;
@@ -55,7 +55,7 @@ pub enum Call {
         name: String,
         grace: Duration,
     },
-    Sweep,
+    Sweep(Sweep),
     Exec {
         container: String,
         argv: Vec<String>,
@@ -395,6 +395,9 @@ struct Shared {
 
 struct State {
     pods: BTreeMap<String, Arc<Pod>>,
+    /// Pods in the builds' namespace that the watch does not show: another
+    /// dispatcher's, or no dispatcher's.
+    strangers: BTreeMap<String, Pod>,
     calls: Vec<Call>,
     /// Every pod `create` was given, refused ones included.
     rendered: Vec<Pod>,
@@ -453,6 +456,7 @@ impl FakeCluster {
             shared: Arc::new(Shared {
                 state: Mutex::new(State {
                     pods: BTreeMap::new(),
+                    strangers: BTreeMap::new(),
                     calls: Vec::new(),
                     rendered: Vec::new(),
                     received: Vec::new(),
@@ -516,6 +520,25 @@ impl FakeCluster {
             .pods
             .insert(name.to_string(), Arc::new(pod));
         self.shared.bump();
+    }
+
+    /// Put a pod labelled `labels` in the builds' namespace that is not this
+    /// dispatcher's, so that its watch does not show it.
+    pub fn leave_stranger(&self, name: &str, labels: &[(&str, &str)]) {
+        let mut pod = Pod::default();
+        pod.metadata.name = Some(name.to_string());
+        pod.metadata.labels = Some(
+            labels
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+        );
+        self.shared.state().strangers.insert(name.to_string(), pod);
+    }
+
+    /// Whether a pod [`Self::leave_stranger`] left is still there.
+    pub fn has_stranger(&self, name: &str) -> bool {
+        self.shared.state().strangers.contains_key(name)
     }
 
     /// Put a build's pod in the cluster, labelled as the dispatcher labels
@@ -775,9 +798,27 @@ impl Cluster for FakeCluster {
         Ok(())
     }
 
-    async fn sweep(&self) -> Result<usize> {
-        self.shared.record(Call::Sweep);
-        let swept = std::mem::take(&mut self.shared.state().pods).len();
+    async fn sweep(&self, which: Sweep) -> Result<usize> {
+        self.shared.record(Call::Sweep(which));
+        let swept = {
+            let mut state = self.shared.state();
+            let managed = |pod: &Pod| {
+                pod.metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get("app.kubernetes.io/managed-by"))
+                    .is_some_and(|by| by == aurcache_worker_kube::pod::MANAGED_BY)
+            };
+            let strangers = match which {
+                Sweep::Own => 0,
+                Sweep::Namespace => {
+                    let before = state.strangers.len();
+                    state.strangers.retain(|_, pod| !managed(pod));
+                    before - state.strangers.len()
+                }
+            };
+            std::mem::take(&mut state.pods).len() + strangers
+        };
         self.shared.bump();
         Ok(swept)
     }

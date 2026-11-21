@@ -11,8 +11,9 @@ use aurcache_build_agent::report::{Ended, SetupStep};
 use aurcache_common::worker::BuildOutcome;
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::settings::WorkerSettings;
-use aurcache_worker_kube::cluster::{Admission, CreateError};
+use aurcache_worker_kube::cluster::{Admission, CreateError, Sweep};
 use aurcache_worker_kube::config::Config;
+use aurcache_worker_kube::executor;
 use aurcache_worker_kube::pod::{BUILD, HOLD, STAGE};
 use std::sync::Arc;
 use std::time::Duration;
@@ -796,10 +797,56 @@ async fn leftover_pods_are_swept_at_startup() {
     rig.cluster
         .leave(&pod_name(4), status::built(0, "Completed"));
     assert_eq!(rig.executor.sweep().await.unwrap(), 2);
-    assert_eq!(rig.cluster.calls(), [Call::Sweep]);
+    assert_eq!(rig.cluster.calls(), [Call::Sweep(Sweep::Namespace)]);
     assert!(!rig.cluster.has_pod(&pod_name(3)));
     assert!(!rig.cluster.has_pod(&pod_name(4)));
     assert_eq!(rig.executor.sweep().await.unwrap(), 0);
+}
+
+/// The startup sweep also deletes the pods of a dispatcher whose identity is
+/// gone, since a builds namespace is one dispatcher's, and leaves a pod no
+/// dispatcher made.
+#[tokio::test(start_paused = true)]
+async fn the_startup_sweep_takes_any_dispatchers_pods() {
+    let rig = Rig::new(Script::default());
+    rig.cluster.leave(&pod_name(3), status::building());
+    let lost = "aurcache-build-fedcba9876543210-4";
+    rig.cluster.leave_stranger(
+        lost,
+        &[
+            ("app.kubernetes.io/managed-by", "aurcache-worker-kube"),
+            ("aurcache.io/dispatcher", "fedcba9876543210"),
+        ],
+    );
+    rig.cluster.leave_stranger(
+        "unrelated",
+        &[("aurcache.io/dispatcher", "fedcba9876543210")],
+    );
+    assert_eq!(rig.executor.sweep().await.unwrap(), 2);
+    assert!(!rig.cluster.has_pod(&pod_name(3)));
+    assert!(!rig.cluster.has_stranger(lost));
+    assert!(rig.cluster.has_stranger("unrelated"));
+}
+
+/// The sweep as the dispatcher stops deletes its own pods and no other
+/// dispatcher's: another's builds may still be running, in a namespace the
+/// operator shared against the advice.
+#[tokio::test(start_paused = true)]
+async fn the_sweep_on_leaving_takes_only_this_dispatchers_pods() {
+    let rig = Rig::new(Script::default());
+    rig.cluster.leave(&pod_name(3), status::building());
+    let other = "aurcache-build-fedcba9876543210-4";
+    rig.cluster.leave_stranger(
+        other,
+        &[
+            ("app.kubernetes.io/managed-by", "aurcache-worker-kube"),
+            ("aurcache.io/dispatcher", "fedcba9876543210"),
+        ],
+    );
+    assert_eq!(executor::leave(&*rig.cluster).await.unwrap(), 1);
+    assert_eq!(rig.cluster.calls(), [Call::Sweep(Sweep::Own)]);
+    assert!(!rig.cluster.has_pod(&pod_name(3)));
+    assert!(rig.cluster.has_stranger(other));
 }
 
 /// A pod no build holds is deleted before the next claim: one whose delete

@@ -142,15 +142,19 @@ with the namespace, the builds' ServiceAccount, the Role and RoleBinding, the
 NetworkPolicy and the quota copied under it). Kubernetes cannot limit a Role
 to pods carrying a label, so two dispatchers in one builds namespace may each
 `exec` into the other's build pods, and so use the SSH key the other has
-while a build of its runs. For the same reason keep nothing else
-in a builds
-namespace: whoever may create pods in a namespace can mount any Secret in it.
+while a build of its runs. A dispatcher also deletes every build pod in its
+builds namespace when it starts, whichever dispatcher made it, so that the
+pods of one whose identity was lost (its volume replaced) are collected; a
+second dispatcher there would end the first one's builds each time it
+starts. Keep nothing else in a builds namespace either: whoever may create
+pods in a namespace can mount any Secret in it.
 
 ### Stopping and updating
 
 When its pod is deleted or its Deployment updated, the dispatcher receives
 `SIGTERM`, claims nothing more, deletes the pods of the builds it is running,
-and reports each of those builds to the server as interrupted. The server ends
+and reports each of those builds to the server as interrupted. Last, it
+deletes any pod of its own still there; another dispatcher's are left alone. The server ends
 them and queues a new build of each package at once. This takes a few seconds
 of the pod's 60-second grace period. The builds' progress is lost: nothing
 adopts a running build pod.
@@ -464,9 +468,10 @@ starts.
 - **Kept failed builds.** The worker has no `keep_failed` setting.
 - **Adopting running pods after a restart.** When the dispatcher dies (a crash,
   an out-of-memory kill, a node lost), its next start deletes the pods it left
-  before it enrolls, and logs
-  `Deleted <n> build pod(s) left by a previous run of this worker`. The server
-  ends the builds those pods ran (their log ends with
+  before it enrolls, with any other build pod in its builds namespace (one
+  left by this worker under an identity it lost, with its data volume), and
+  logs `Deleted <n> build pod(s) left by a previous run of this worker`. The
+  server ends the builds those pods ran (their log ends with
   `Abandoned: its worker stopped reporting it.`) and queues a new build of each
   package, under a new number, while the package has attempts left. Pods also
   bound themselves: each carries a deadline of its build's timeout plus five

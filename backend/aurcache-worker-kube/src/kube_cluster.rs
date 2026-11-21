@@ -12,7 +12,7 @@
 //! a pipe of its own, drained by a task of its own, because a full stderr pipe
 //! would stop stdout and the exit status with it.
 
-use crate::cluster::{Admission, Cluster, CreateError, Exec, ExecEnd, PROMPT, Stdin};
+use crate::cluster::{Admission, Cluster, CreateError, Exec, ExecEnd, PROMPT, Stdin, Sweep};
 use crate::pod;
 use anyhow::{Context, Result, ensure};
 use futures::StreamExt;
@@ -53,6 +53,7 @@ pub struct KubeCluster {
     client: kube::Client,
     pods: Api<Pod>,
     namespace: String,
+    /// What labels this dispatcher's pods.
     selector: String,
     store: Store<Pod>,
     generation: watch::Receiver<u64>,
@@ -157,17 +158,21 @@ impl Cluster for KubeCluster {
         }
     }
 
-    async fn sweep(&self) -> Result<usize> {
+    async fn sweep(&self, which: Sweep) -> Result<usize> {
         let params = DeleteParams {
             grace_period_seconds: Some(u32::try_from(PROMPT.as_secs()).unwrap_or(1)),
             ..DeleteParams::default()
         };
-        let list = ListParams::default().labels(&self.selector);
+        let selector = match which {
+            Sweep::Namespace => pod::managed_selector(),
+            Sweep::Own => self.selector.clone(),
+        };
+        let list = ListParams::default().labels(&selector);
         let deleted = self
             .pods
             .delete_collection(&params, &list)
             .await
-            .with_context(|| format!("deleting the pods labelled {}", self.selector))?;
+            .with_context(|| format!("deleting the pods labelled {selector}"))?;
         // The API answers a collection delete with the list of what it
         // deleted; a bare status names no pods.
         Ok(deleted.left().map_or(0, |pods| pods.items.len()))
@@ -1254,7 +1259,7 @@ mod live {
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs a cluster: AURCACHE_KUBE_TESTS=1"]
-    async fn sweep_deletes_this_dispatchers_pods_only() {
+    async fn sweep_deletes_its_own_or_every_dispatchers_pods_and_nothing_else() {
         if !enabled() {
             return;
         }
@@ -1268,14 +1273,29 @@ mod live {
                 .await
                 .unwrap();
         }
-        let kept = unique("kept");
+        // Another dispatcher's, whose identity is gone.
+        let lost = unique("lost");
         cluster
-            .create(&busybox(&theirs, &kept, "sleep 3600"))
+            .create(&busybox(&theirs, &lost, "sleep 3600"))
             .await
             .unwrap();
+        // No dispatcher's, though the other's watch shows it.
+        let kept = unique("kept");
+        let mut unmanaged = busybox(&theirs, &kept, "sleep 3600");
+        unmanaged.metadata.labels = Some(std::collections::BTreeMap::from([(
+            "aurcache.io/dispatcher".to_owned(),
+            theirs.clone(),
+        )]));
+        cluster.create(&unmanaged).await.unwrap();
+        until(&other, &lost, RUNNING, |pod| pod.is_some()).await;
         until(&other, &kept, RUNNING, |pod| pod.is_some()).await;
 
-        assert_eq!(cluster.sweep().await.unwrap(), 3);
+        assert_eq!(cluster.sweep(Sweep::Own).await.unwrap(), 3);
+        assert!(
+            other.pod(&lost).is_some(),
+            "another dispatcher's pod is left"
+        );
+        assert_eq!(cluster.sweep(Sweep::Namespace).await.unwrap(), 1);
         let mut moved = cluster.generation();
         while !cluster.pods().is_empty() {
             tokio::time::timeout(RUNNING, moved.changed())
@@ -1283,9 +1303,10 @@ mod live {
                 .unwrap()
                 .unwrap();
         }
+        until(&other, &lost, RUNNING, |pod| pod.is_none()).await;
         assert!(other.pod(&kept).is_some());
-        assert_eq!(cluster.sweep().await.unwrap(), 0);
-        assert_eq!(other.sweep().await.unwrap(), 1);
+        assert_eq!(cluster.sweep(Sweep::Namespace).await.unwrap(), 0);
+        other.delete(&kept, PROMPT).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -6,8 +6,9 @@
 //! [`KubeCluster`](crate::kube_cluster::KubeCluster) is the one over a real
 //! API server.
 //!
-//! Pods are scoped: every method acts in the builds' namespace, on pods
-//! carrying this dispatcher's label, as the implementation was set up.
+//! Pods are scoped: every method acts in the builds' namespace, as the
+//! implementation was set up, and on pods carrying this dispatcher's label,
+//! but for [`Cluster::sweep`] over [`Sweep::Namespace`].
 
 use anyhow::Result;
 use futures::future::BoxFuture;
@@ -25,8 +26,8 @@ pub trait Cluster: Send + Sync + 'static {
     fn admits(&self, pod: &Pod) -> impl Future<Output = Admission> + Send;
     /// Delete one pod; one already gone is not an error.
     fn delete(&self, name: &str, grace: Duration) -> impl Future<Output = Result<()>> + Send;
-    /// Delete every pod carrying this dispatcher's label; how many there were.
-    fn sweep(&self) -> impl Future<Output = Result<usize>> + Send;
+    /// Delete the build pods `which` names; how many there were.
+    fn sweep(&self, which: Sweep) -> impl Future<Output = Result<usize>> + Send;
     /// The pod as the watch last saw it; `None` when there is none by that name.
     fn pod(&self, name: &str) -> Option<Arc<Pod>>;
     /// Every pod of this dispatcher, as the watch last saw them.
@@ -47,6 +48,17 @@ pub trait Cluster: Send + Sync + 'static {
         container: &str,
         lines: i64,
     ) -> impl Future<Output = Result<String>> + Send;
+}
+
+/// Which build pods a sweep deletes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sweep {
+    /// Every pod in the builds' namespace that a dispatcher made, this one
+    /// or any other: what one whose identity was lost left there is
+    /// nobody's to collect but the next dispatcher's.
+    Namespace,
+    /// This dispatcher's own.
+    Own,
 }
 
 /// Why a pod was not created.
