@@ -137,10 +137,9 @@ pub(crate) struct RestoreArgs {
     #[arg(long, value_enum, default_value_t = OnExisting::Skip)]
     pub(crate) on_existing: OnExisting,
     /// Replace what is here rather than adding to it. Destructive: every
-    /// package, setting and worker this instance has is removed first, and
-    /// the repository's signing key is left as a fresh install has it -- the
-    /// dump's, or none (a new one, on a server that signs), which every client
-    /// then has to trust.
+    /// package, setting and worker this instance has is removed first. The
+    /// dump's secrets are taken, as with --secrets copy; a dump without a
+    /// signing key leaves this server's as it is.
     #[arg(long)]
     pub(crate) clear: bool,
     /// Take the dump's CA, worker certificates, token hashes and signing key.

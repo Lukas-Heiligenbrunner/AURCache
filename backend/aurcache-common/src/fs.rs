@@ -514,22 +514,6 @@ fn is_shared(metadata: &fs::Metadata) -> bool {
     }
 }
 
-/// Remove the file at `path`, if there is one, and sync its directory: what
-/// [`Staged::install`] is to a file put in place, for one taken away. A
-/// failed sync is not an error but [`Installed::Unsynced`]: the file is gone
-/// for every reader either way.
-pub fn remove_synced(path: &Path) -> std::io::Result<Installed> {
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    Ok(match sync_dir(parent_of(path)) {
-        Ok(()) => Installed::Synced,
-        Err(error) => Installed::Unsynced { error },
-    })
-}
-
 /// Remove what [`stage_private`] left in `dir` and nothing installed: a
 /// process that stopped between staging and installing leaves its files
 /// behind, and nothing else ever names them. For a directory only this
@@ -735,18 +719,6 @@ mod tests {
         names.sort();
         assert_eq!(names, [".other", "secret"]);
         assert_eq!(remove_staged(&tmp.path().join("missing")).unwrap(), 0);
-    }
-
-    /// A file removed is gone, its directory synced; one that is not there
-    /// is removed already.
-    #[test]
-    fn a_file_is_removed_and_its_directory_synced() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("secret");
-        fs::write(&path, "x").unwrap();
-        assert!(matches!(remove_synced(&path).unwrap(), Installed::Synced));
-        assert!(!path.exists());
-        assert!(matches!(remove_synced(&path).unwrap(), Installed::Synced));
     }
 
     /// A replaced file is kept under its fingerprint, owner-only; another

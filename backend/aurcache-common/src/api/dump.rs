@@ -365,10 +365,6 @@ pub enum SecretChange {
     Restored,
     /// The dump's, in place of this server's.
     Replaced,
-    /// A new one, in place of this server's, as a fresh install generates.
-    Generated,
-    /// Removed, as a fresh install has none.
-    Removed,
 }
 
 impl SecretChange {
@@ -379,8 +375,6 @@ impl SecretChange {
             Self::Kept => "kept",
             Self::Restored => "restored",
             Self::Replaced => "replaced",
-            Self::Generated => "generated",
-            Self::Removed => "removed",
         }
     }
 }

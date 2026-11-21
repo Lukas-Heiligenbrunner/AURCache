@@ -376,10 +376,10 @@ fn RestoreOptionsForm(
                     div { class: "text-sm", "Replace everything" }
                     div { class: "text-xs opacity-60",
                         "Remove every package, setting and worker here first, so this \
-                         instance ends up as the dump describes and nothing else. The \
-                         repository's signing key ends up as a fresh install has it: the \
-                         dump's, or a new one, which every client then has to trust. The \
-                         key it replaces is kept beside it, named for its fingerprint."
+                         instance ends up as the dump describes and nothing else. A \
+                         signing key in the dump replaces this server's, which is kept \
+                         beside it, named for its fingerprint; without one, the key is \
+                         left as it is."
                     }
                 }
             }
@@ -470,6 +470,6 @@ fn change_class(change: SecretChange) -> &'static str {
         SecretChange::Kept => "badge-ghost",
         SecretChange::Restored => "badge-success",
         // Each changes what workers or clients have to trust.
-        SecretChange::Replaced | SecretChange::Generated | SecretChange::Removed => "badge-warning",
+        SecretChange::Replaced => "badge-warning",
     }
 }

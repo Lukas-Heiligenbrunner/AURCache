@@ -1619,9 +1619,10 @@ mod signing_key {
         RestoreEntry, Secret, SecretChange, SecretReport, SecretsPolicy,
     };
     use aurcache_signing::{InstanceKey, KEY_FILE, KeyLocation};
+    use aurcache_utils::repository::KeyReplacement;
     use aurcache_utils::restore::{
-        CaOutcome, KeyOutcome, LoadedDump, SecretsConfig, SignsWith, apply, apply_secrets,
-        load_dump, plan_secrets, preview, secret_reports,
+        CaOutcome, KeyOutcome, LoadedDump, SecretsConfig, apply, apply_secrets, load_dump,
+        plan_secrets, preview, secret_reports,
     };
     use aurcache_utils::signing::{Backfill, backfill};
     use pacman_mirrors::platforms::Platform;
@@ -2033,16 +2034,18 @@ mod signing_key {
         assert!(!repo.signing_info().unwrap().backfilling);
     }
 
-    /// `--clear` with a dump carrying no key leaves the server as a new one
-    /// starts: a server that signs with its own key gets a newly generated
-    /// one, and the backfill signs everything with it.
+    /// `--clear` with a dump carrying no key keeps the key, as it keeps the
+    /// CA: a server that signs goes on signing with it, its key file as it
+    /// was, nothing kept beside it, and the restore says nothing about it.
     #[tokio::test]
-    async fn clearing_without_a_key_starts_over_with_a_new_one() {
+    async fn clearing_without_a_key_leaves_the_key_untouched() {
         let target = aurcache_db::testing::memory_db().await;
         let target_ca = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let repo = signing_server(&target, target_ca.path(), root.path()).await;
-        let before = repo.key().unwrap().fingerprint().to_string();
+        let before = repo.key().unwrap();
+        let key_file = std::fs::read(target_ca.path().join(KEY_FILE)).unwrap();
+        let files = listing(target_ca.path());
 
         let entries = restore(
             &target,
@@ -2053,69 +2056,35 @@ mod signing_key {
         )
         .await;
         assert!(failures(&entries).is_empty(), "{entries:?}");
-        let key = repo.key().unwrap();
-        assert_ne!(key.fingerprint(), before);
-        let kept = target_ca
-            .path()
-            .join(format!("{KEY_FILE}.replaced-{before}"));
-        assert_private(&kept);
+        assert!(Arc::ptr_eq(&repo.key().unwrap(), &before));
+        assert_eq!(
+            std::fs::read(target_ca.path().join(KEY_FILE)).unwrap(),
+            key_file
+        );
+        assert_eq!(listing(target_ca.path()), files);
+        assert_untouched(&entries, Secret::SigningKey);
         assert_untouched(&entries, Secret::Ca);
-        let line = secret_line(&entries, Secret::SigningKey);
-        assert_eq!(line.change, SecretChange::Generated);
-        assert!(
-            line.detail.contains(key.fingerprint())
-                && line.detail.contains(&format!("kept as {}", kept.display())),
-            "{}",
-            line.detail
-        );
-        let on_disk = std::fs::read(target_ca.path().join(KEY_FILE)).unwrap();
-        assert_eq!(
-            aurcache_signing::inspect(&on_disk).unwrap().fingerprint,
-            key.fingerprint()
-        );
-        assert_eq!(
-            backfill(&target, &repo).await.unwrap(),
-            Backfill::Complete {
-                signed: 1,
-                skipped: Vec::new(),
-            }
-        );
-        all_signed_by(&key, root.path());
     }
 
-    /// `--clear` on a server that does not sign removes its key file, as a
-    /// new instance has none; a dump with a key puts that one in place.
+    /// `--clear` on a server that does not sign keeps its key file too when
+    /// the dump carries no key; a dump with one puts that one in place.
     #[tokio::test]
-    async fn clearing_removes_the_key_or_takes_the_dumps() {
+    async fn clearing_takes_the_dumps_key_and_keeps_its_own_otherwise() {
         let ca = tempfile::tempdir().unwrap();
         aurcache_ca::Ca::load_or_create(ca.path()).unwrap();
-        let removed = InstanceKey::load_or_create(&ca.path().join(KEY_FILE), None)
-            .unwrap()
-            .fingerprint()
-            .to_string();
-        let removed_file = std::fs::read(ca.path().join(KEY_FILE)).unwrap();
+        InstanceKey::load_or_create(&ca.path().join(KEY_FILE), None).unwrap();
+        let key_file = std::fs::read(ca.path().join(KEY_FILE)).unwrap();
         let repo = Repository::new(tempfile::tempdir().unwrap().keep());
 
         let without = load_dump(&dump_without_secrets().await).unwrap();
         let plan = plan_secrets(&without, &clear(), own(ca.path()))
             .await
             .unwrap();
-        let applied = apply_secrets(plan, &repo).await;
-        let KeyOutcome::Reset {
-            generated: None,
-            supplied: None,
-            file,
-        } = applied.signing_key
-        else {
-            panic!("{applied:?}");
-        };
-        assert!(!ca.path().join(KEY_FILE).exists());
-        // Removed, but not lost: kept under its fingerprint, owner-only.
-        let kept = ca.path().join(format!("{KEY_FILE}.replaced-{removed}"));
-        assert_eq!(file.previous.fingerprint(), Some(removed.as_str()));
-        assert_eq!(file.previous.kept(), Some(kept.as_path()));
-        assert_eq!(std::fs::read(&kept).unwrap(), removed_file);
-        assert_private(&kept);
+        assert_eq!(
+            apply_secrets(plan, &repo).await.signing_key,
+            KeyOutcome::Kept
+        );
+        assert_eq!(std::fs::read(ca.path().join(KEY_FILE)).unwrap(), key_file);
 
         let SourceDump {
             bytes,
@@ -2127,7 +2096,7 @@ mod signing_key {
         assert!(matches!(
             applied.signing_key,
             KeyOutcome::Installed {
-                signs_with: SignsWith::Nothing,
+                replacement: KeyReplacement::NotSigning,
                 ..
             }
         ));
@@ -2362,10 +2331,11 @@ mod signing_key {
         let applied = apply_secrets(plan, &repo).await;
         assert!(matches!(
             applied.signing_key,
-            KeyOutcome::Installed {
-                signs_with: SignsWith::Supplied { ref fingerprint, signs: true },
+            KeyOutcome::BesideSupplied {
+                ref supplied,
+                signs: true,
                 ..
-            } if fingerprint.as_deref() == Some(supplied_fingerprint.as_str())
+            } if supplied.as_deref() == Some(supplied_fingerprint.as_str())
         ));
         assert_eq!(std::fs::read(&supplied_path).unwrap(), supplied_file);
         assert_eq!(
@@ -2401,7 +2371,7 @@ mod signing_key {
             .await
             .unwrap();
         let applied = apply_secrets(plan, &repo).await;
-        assert!(matches!(applied.signing_key, KeyOutcome::NotWritten { .. }));
+        assert_eq!(applied.signing_key, KeyOutcome::Kept);
         assert_eq!(std::fs::read(&path).unwrap(), file);
 
         let without = load_dump(&dump_without_secrets().await).unwrap();
@@ -2427,7 +2397,7 @@ mod signing_key {
         assert!(matches!(
             applied.signing_key,
             KeyOutcome::Installed {
-                signs_with: SignsWith::Nothing,
+                replacement: KeyReplacement::NotSigning,
                 ..
             }
         ));
@@ -2494,63 +2464,20 @@ mod signing_key {
         assert_eq!(repo.key().unwrap().fingerprint(), fingerprint);
     }
 
-    /// `--clear` puts a new key in place of the old by a rename, so there is
-    /// never a moment without one, and a key file that is not a regular file
-    /// -- one a rename cannot replace -- refuses the restore before anything.
+    /// A key file that is not a regular file -- one a rename cannot replace
+    /// -- refuses a restore that would replace it, before anything is
+    /// written.
     #[tokio::test]
-    async fn clearing_replaces_the_key_file_and_refuses_one_it_cannot_replace() {
-        let target = aurcache_db::testing::memory_db().await;
-        let target_ca = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        let repo = signing_server(&target, target_ca.path(), root.path()).await;
-        let before = repo.key().unwrap().fingerprint().to_string();
-        let config = || SecretsConfig {
-            signs: true,
-            ..own(target_ca.path())
-        };
-        let without = load_dump(&dump_without_secrets().await).unwrap();
-
-        let plan = plan_secrets(&without, &clear(), config()).await.unwrap();
-        // Staged: the old key is still there, and still signs.
-        let on_disk = std::fs::read(target_ca.path().join(KEY_FILE)).unwrap();
-        assert_eq!(
-            aurcache_signing::inspect(&on_disk).unwrap().fingerprint,
-            before
-        );
-        let applied = apply_secrets(plan, &repo).await;
-        let KeyOutcome::Reset {
-            generated: Some(generated),
-            supplied: None,
-            file,
-        } = applied.signing_key
-        else {
-            panic!("{applied:?}");
-        };
-        assert_eq!(file.previous.fingerprint(), Some(before.as_str()));
-        assert_eq!(repo.key().unwrap().fingerprint(), generated);
-        let on_disk = std::fs::read(target_ca.path().join(KEY_FILE)).unwrap();
-        assert_eq!(
-            aurcache_signing::inspect(&on_disk).unwrap().fingerprint,
-            generated
-        );
-        // The key it replaced is kept beside it, as it was, owner-only.
-        let kept = target_ca
-            .path()
-            .join(format!("{KEY_FILE}.replaced-{before}"));
-        assert_eq!(file.previous.kept(), Some(kept.as_path()));
-        assert_eq!(
-            aurcache_signing::inspect(&std::fs::read(&kept).unwrap())
-                .unwrap()
-                .fingerprint,
-            before
-        );
-        assert_private(&kept);
-
-        let path = target_ca.path().join(KEY_FILE);
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
-        let files = listing(target_ca.path());
-        let error = plan_secrets(&without, &clear(), config())
+    async fn a_key_file_a_rename_cannot_replace_refuses_the_restore() {
+        let SourceDump {
+            bytes,
+            ca: _source_ca,
+        } = dump_with_key(SourceKey::Unlocked).await;
+        let dump = load_dump(&bytes).unwrap();
+        let ca = tempfile::tempdir().unwrap();
+        std::fs::create_dir(ca.path().join(KEY_FILE)).unwrap();
+        let files = listing(ca.path());
+        let error = plan_secrets(&dump, &copy_secrets(), own(ca.path()))
             .await
             .err()
             .unwrap();
@@ -2558,7 +2485,7 @@ mod signing_key {
             format!("{error:#}").contains("AURCACHE_SIGNING_KEY_FILE"),
             "{error:#}"
         );
-        assert_eq!(listing(target_ca.path()), files);
+        assert_eq!(listing(ca.path()), files);
     }
 
     /// A supplied key is recognised where the server keeps its own however
@@ -2587,10 +2514,7 @@ mod signing_key {
 
         let plan = plan_secrets(&dump, &copy_secrets(), config).await.unwrap();
         let applied = apply_secrets(plan, &repo).await;
-        assert!(
-            matches!(applied.signing_key, KeyOutcome::NotWritten { .. }),
-            "{applied:?}"
-        );
+        assert_eq!(applied.signing_key, KeyOutcome::Kept, "{applied:?}");
         assert_eq!(std::fs::read(&supplied_path).unwrap(), file);
         assert_eq!(std::fs::read(ca.path().join(KEY_FILE)).unwrap(), file);
     }
@@ -2742,7 +2666,7 @@ mod signing_key {
             .unwrap();
         let applied = apply_secrets(plan, &repo).await;
         let KeyOutcome::Installed {
-            signs_with: SignsWith::NewSigner,
+            replacement: KeyReplacement::SignerChanged,
             file,
             ..
         } = &applied.signing_key
@@ -2881,7 +2805,7 @@ mod signing_key {
                 .await
                 .signing_key,
             KeyOutcome::Installed {
-                signs_with: SignsWith::Nothing,
+                replacement: KeyReplacement::NotSigning,
                 ..
             }
         ));
@@ -2925,7 +2849,7 @@ mod signing_key {
             matches!(
                 applied.signing_key,
                 KeyOutcome::Installed {
-                    signs_with: SignsWith::Restored { .. },
+                    replacement: KeyReplacement::Replaced { .. },
                     ..
                 }
             ),
@@ -2988,10 +2912,10 @@ mod signing_key {
         };
         let plan = plan_secrets(&dump, &copy_secrets(), config).await.unwrap();
         let repo = Repository::new(tempfile::tempdir().unwrap().keep()).with_key(supplied);
-        assert!(matches!(
+        assert_eq!(
             apply_secrets(plan, &repo).await.signing_key,
-            KeyOutcome::NotWritten { signs: true, .. }
-        ));
+            KeyOutcome::Kept
+        );
     }
 
     /// `--clear` with nothing to clear writes nothing, so a CA directory
@@ -3047,12 +2971,16 @@ mod signing_key {
         std::fs::remove_file(&blocked).unwrap();
         std::fs::create_dir(&blocked).unwrap();
         std::fs::write(blocked.join("in-the-way"), b"x").unwrap();
+        let SourceDump {
+            bytes,
+            ca: _source_ca,
+        } = dump_with_key(SourceKey::Unlocked).await;
 
         let entries = restore(
             &target,
             target_ca.path(),
             Arc::clone(&repo),
-            &dump_without_secrets().await,
+            &bytes,
             clear(),
         )
         .await;
