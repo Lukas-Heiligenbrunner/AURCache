@@ -295,6 +295,163 @@ pub fn parse_bind_mounts(raw: &str) -> Vec<BindMount> {
         .collect()
 }
 
+/// A key `WORKER_GIT_SSH_KEYS` names: the key at `path`, offered to the
+/// builds whose package's `build_ssh_key` setting is `name`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedKey {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// Parse `WORKER_GIT_SSH_KEYS` (`name:path,name:path`).
+///
+/// An entry is dropped, and reported, when its name is not a key name (see
+/// [`aurcache_common::ssh_key::validate_name`]), when it is `default` -- the
+/// key `WORKER_GIT_SSH_KEY` names, or the generated one, which this cannot
+/// redefine -- when an earlier entry has the name already, or when it has no
+/// path. A key the operator meant and the worker does not hold is otherwise
+/// only discovered as a build that fails at its fetch.
+#[must_use]
+pub fn parse_named_keys(raw: &str) -> Vec<NamedKey> {
+    let mut keys: Vec<NamedKey> = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let Some((name, path)) = entry
+            .split_once(':')
+            .map(|(name, path)| (name.trim(), path.trim()))
+            .filter(|(_, path)| !path.is_empty())
+        else {
+            tracing::warn!("ignoring WORKER_GIT_SSH_KEYS entry {entry:?} (expected name:path)");
+            continue;
+        };
+        let refusal = if let Err(e) = aurcache_common::ssh_key::validate_name(name) {
+            Some(e)
+        } else if name == aurcache_common::ssh_key::DEFAULT {
+            Some("`default` is the key WORKER_GIT_SSH_KEY names, or the generated one".to_string())
+        } else if keys.iter().any(|key| key.name == name) {
+            Some(format!("an earlier entry names {name:?} already"))
+        } else {
+            None
+        };
+        if let Some(why) = refusal {
+            tracing::warn!("ignoring WORKER_GIT_SSH_KEYS entry {entry:?}: {why}");
+            continue;
+        }
+        keys.push(NamedKey {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+        });
+    }
+    keys
+}
+
+/// The users a key's file is judged for: the worker, which reads it into the
+/// key's agent, and the build user, which must not be able to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyReaders {
+    /// The uid the worker runs as.
+    pub worker: u32,
+    /// The build user's uid; `None` when there is no such user.
+    pub build: Option<u32>,
+}
+
+impl KeyReaders {
+    /// This process, and builds run as `build_user`.
+    #[must_use]
+    pub fn of(build_user: &str) -> Self {
+        Self {
+            worker: aurcache_chroot::Owner::current().uid,
+            build: aurcache_chroot::Owner::of_user(build_user).map(|owner| owner.uid),
+        }
+    }
+}
+
+/// Whether a build could read a key's file itself, rather than only have the
+/// key's agent sign with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyFile {
+    /// There is none, or the worker cannot look at it: no agent loads it
+    /// either, which the worker says when it tries.
+    Absent,
+    /// A build cannot read it.
+    Kept,
+    /// A build could read it; `why` names the file, its owner and its mode,
+    /// and what of them lets a build in.
+    Readable { why: String },
+}
+
+/// Whether a build could read the key file at `path`, for `readers`.
+///
+/// No key file is ever mounted into a chroot, so what matters is the
+/// PKGBUILD code that runs outside it, as the build user. That code cannot
+/// read a regular file of the worker's own with no permission bit for its
+/// group or anyone else, unless the build user is its owner or root. A
+/// symlink is judged by the file it leads to.
+///
+/// Only the owner and mode are judged: whatever grants access past them (an
+/// NFSv4 ACL, a FUSE or CIFS mount that does not check permissions) is not
+/// seen. A POSIX ACL is, as its mask shows in the group bits.
+#[must_use]
+pub fn key_file(path: &Path, readers: KeyReaders) -> KeyFile {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return KeyFile::Absent;
+    };
+    let owner = metadata.uid();
+    let mode = metadata.mode() & 0o7777;
+    let gap = if !metadata.is_file() {
+        "it is not a regular file".to_string()
+    } else if owner != readers.worker {
+        format!("it is not the worker's own (uid {})", readers.worker)
+    } else if readers.build == Some(owner) {
+        "builds run as its owner".to_string()
+    } else if readers.build == Some(0) {
+        "builds run as root, which reads every file".to_string()
+    } else if mode & 0o077 != 0 {
+        "its mode lets its group or others in".to_string()
+    } else {
+        return KeyFile::Kept;
+    };
+    KeyFile::Readable {
+        why: format!(
+            "{} belongs to uid {owner} and has mode {mode:04o}: {gap}",
+            path.display()
+        ),
+    }
+}
+
+/// Refuse to start with a named key whose file a build could read, and warn
+/// of a default key's (`default`).
+///
+/// A build is offered a key through its agent, which signs and never hands
+/// the key back; a build that reads the file itself can keep the key. A named
+/// key's would then be every build's, not only that of the packages naming
+/// it: refused. The default key is offered to every build anyway, and must no
+/// more be one a build can keep, but workers have run with such a file: a
+/// loud warning, then, rather than a worker that no longer starts.
+pub fn check_key_files(default: &Path, named: &[NamedKey], readers: KeyReaders) -> Result<()> {
+    let fix = "make it a regular file of the worker's own, with mode 0600 or 0400";
+    if let KeyFile::Readable { why } = key_file(default, readers) {
+        tracing::warn!(
+            "A build can read the default SSH key's file itself, not only use the key through \
+             its agent, and so keep the key: {why}. To keep it from builds, {fix}"
+        );
+    }
+    let readable: Vec<String> = named
+        .iter()
+        .filter_map(|key| match key_file(&key.path, readers) {
+            KeyFile::Readable { why } => Some(format!("SSH key {:?}: {why}", key.name)),
+            KeyFile::Absent | KeyFile::Kept => None,
+        })
+        .collect();
+    anyhow::ensure!(
+        readable.is_empty(),
+        "refusing to start: a build could read the file of a key WORKER_GIT_SSH_KEYS names, \
+         and so keep the key, whichever package it is for. {}. For each, {fix}",
+        readable.join("; ")
+    );
+    Ok(())
+}
+
 /// Stage the build credentials for one job into `dir`, returning the
 /// `GIT_SSH_COMMAND` to export; `None` when there is no credential to use.
 ///
@@ -376,6 +533,198 @@ fn stage_known_hosts(src: &Path, dir: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn named(name: &str, path: &str) -> NamedKey {
+        NamedKey {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+        }
+    }
+
+    #[test]
+    fn named_keys_are_name_path_pairs() {
+        assert_eq!(
+            parse_named_keys(
+                "gitlab:/etc/aurcache-worker/gitlab_ed25519, epic : /run/secrets/epic,"
+            ),
+            vec![
+                named("gitlab", "/etc/aurcache-worker/gitlab_ed25519"),
+                named("epic", "/run/secrets/epic"),
+            ]
+        );
+        assert_eq!(parse_named_keys(""), Vec::new());
+    }
+
+    /// Only the first `:` separates, so a path may hold one.
+    #[test]
+    fn a_named_keys_path_may_hold_a_colon() {
+        assert_eq!(
+            parse_named_keys("gitlab:/keys/a:b"),
+            vec![named("gitlab", "/keys/a:b")]
+        );
+    }
+
+    /// What is no key name, `default`, a name given twice and an entry
+    /// without a path are dropped; the rest are kept.
+    #[test]
+    fn a_named_key_that_cannot_be_one_is_dropped() {
+        assert_eq!(
+            parse_named_keys(
+                "default:/k/d,Gitlab:/k/g,../x:/k/x,gitlab,epic:,gitlab:/k/1,gitlab:/k/2"
+            ),
+            vec![named("gitlab", "/k/1")]
+        );
+    }
+
+    /// A key file `name` in `dir`, with `mode`.
+    fn key_with_mode(dir: &Path, name: &str, mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, "key").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    /// This process as the worker, and builds run as another user.
+    fn readers() -> KeyReaders {
+        let me = aurcache_chroot::Owner::current().uid;
+        KeyReaders {
+            worker: me,
+            build: Some(me + 1),
+        }
+    }
+
+    /// Why a build could read `path`; panics when it could not.
+    fn readable(path: &Path, readers: KeyReaders) -> String {
+        match key_file(path, readers) {
+            KeyFile::Readable { why } => why,
+            other => panic!("{}: {other:?}", path.display()),
+        }
+    }
+
+    /// A file of the worker's own that only its owner may read is kept from
+    /// builds.
+    #[test]
+    fn a_key_only_the_worker_may_read_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        for mode in [0o600, 0o400] {
+            let key = key_with_mode(tmp.path(), &format!("k{mode:o}"), mode);
+            assert_eq!(key_file(&key, readers()), KeyFile::Kept);
+        }
+    }
+
+    /// Any permission bit for the group or others lets a build in, and the
+    /// reason names the file, its owner and its mode.
+    #[test]
+    fn a_key_others_may_read_is_readable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let me = readers().worker;
+        for mode in [0o644, 0o640, 0o604, 0o620] {
+            let key = key_with_mode(tmp.path(), &format!("k{mode:o}"), mode);
+            let why = readable(&key, readers());
+            assert_eq!(
+                why,
+                format!(
+                    "{} belongs to uid {me} and has mode {mode:04o}: its mode lets its group \
+                     or others in",
+                    key.display()
+                )
+            );
+        }
+    }
+
+    /// Mode `0600` keeps no one out who is its owner, or root: a build run
+    /// as either reads it.
+    #[test]
+    fn a_key_the_build_user_owns_or_root_reads_is_readable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = key_with_mode(tmp.path(), "k", 0o600);
+        let me = readers().worker;
+        let same = KeyReaders {
+            worker: me,
+            build: Some(me),
+        };
+        assert!(readable(&key, same).ends_with("builds run as its owner"));
+        if me != 0 {
+            let root = KeyReaders {
+                worker: me,
+                build: Some(0),
+            };
+            assert!(readable(&key, root).ends_with("builds run as root, which reads every file"));
+        }
+    }
+
+    /// A file of another user's is not one the worker can vouch for.
+    #[test]
+    fn a_key_of_another_users_is_readable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = key_with_mode(tmp.path(), "k", 0o600);
+        let me = readers().worker;
+        let elsewhere = KeyReaders {
+            worker: me + 2,
+            build: Some(me + 1),
+        };
+        assert!(
+            readable(&key, elsewhere)
+                .ends_with(&format!("it is not the worker's own (uid {})", me + 2))
+        );
+    }
+
+    /// A symlink is judged by the file it leads to, not by its own mode.
+    #[test]
+    fn a_symlink_is_judged_by_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kept = key_with_mode(tmp.path(), "kept", 0o600);
+        let loose = key_with_mode(tmp.path(), "loose", 0o644);
+        let to_kept = tmp.path().join("to-kept");
+        std::os::unix::fs::symlink(&kept, &to_kept).unwrap();
+        let to_loose = tmp.path().join("to-loose");
+        std::os::unix::fs::symlink(&loose, &to_loose).unwrap();
+
+        assert_eq!(key_file(&to_kept, readers()), KeyFile::Kept);
+        assert!(readable(&to_loose, readers()).contains("its mode lets"));
+    }
+
+    /// A directory is no key file, and a missing file no file at all.
+    #[test]
+    fn a_directory_is_readable_and_a_missing_file_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(readable(tmp.path(), readers()).ends_with("it is not a regular file"));
+        assert_eq!(
+            key_file(&tmp.path().join("missing"), readers()),
+            KeyFile::Absent
+        );
+    }
+
+    /// A named key a build could read stops the worker from starting, and
+    /// says which, with its file, owner and mode. The default key's only
+    /// warns.
+    #[test]
+    fn a_named_key_a_build_could_read_refuses_the_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loose = key_with_mode(tmp.path(), "loose", 0o644);
+        let kept = key_with_mode(tmp.path(), "kept", 0o600);
+        let me = readers().worker;
+        let gitlab = |path: &Path| vec![named("gitlab", path.to_str().unwrap())];
+
+        let error = check_key_files(&kept, &gitlab(&loose), readers())
+            .expect_err("a named key a build could read must refuse the start");
+        let message = error.to_string();
+        assert!(message.starts_with("refusing to start"), "{message}");
+        assert!(
+            message.contains(&format!(
+                "SSH key \"gitlab\": {} belongs to uid {me} and has mode 0644",
+                loose.display()
+            )),
+            "{message}"
+        );
+        assert!(message.contains("mode 0600 or 0400"), "{message}");
+
+        check_key_files(&loose, &gitlab(&kept), readers())
+            .expect("the default key's file only warns");
+        check_key_files(&tmp.path().join("missing"), &[], readers())
+            .expect("no key at all is no refusal");
+    }
 
     fn cfg_with(key: Option<&str>, data_dir: &str) -> Config {
         let mut cfg = Config::from_process_env();
@@ -526,14 +875,16 @@ mod tests {
     /// while a worker without an agent is still left alone.
     #[test]
     fn the_export_names_the_socket_and_is_guarded_on_it() {
-        let cred = credential("/var/lib/aurcache-worker/agent/agent.sock");
+        let cred = credential("/var/lib/aurcache-worker/agent/default/agent.sock");
         let conf = augment_makepkg_conf("PKGDEST=/output", Some(&cred));
 
-        assert!(conf.contains("export SSH_AUTH_SOCK=/var/lib/aurcache-worker/agent/agent.sock"));
+        assert!(
+            conf.contains("export SSH_AUTH_SOCK=/var/lib/aurcache-worker/agent/default/agent.sock")
+        );
         assert!(conf.trim_end().ends_with("fi"));
         // The guard must wrap both exports, not sit beside them.
         let guard = conf
-            .find("if [ -S /var/lib/aurcache-worker/agent/agent.sock ]")
+            .find("if [ -S /var/lib/aurcache-worker/agent/default/agent.sock ]")
             .expect("guard names the socket");
         let sock = conf.find("export SSH_AUTH_SOCK").expect("socket export");
         let git = conf.find("export GIT_SSH_COMMAND").expect("git export");

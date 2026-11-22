@@ -26,6 +26,9 @@ pub struct Config {
     pub git_ssh_key: Option<PathBuf>,
     /// Optional `known_hosts` to trust inside the build chroot.
     pub ssh_known_hosts: Option<PathBuf>,
+    /// The keys `WORKER_GIT_SSH_KEYS` names, each for the builds whose
+    /// package names it. The machine's alone, like the default key.
+    pub named_ssh_keys: Vec<crate::credentials::NamedKey>,
     /// Extra `host:chroot` bind mounts exposed to every build, for credentials
     /// that are not SSH (a `.netrc`, an API token, a licence file).
     pub bind_mounts: Vec<crate::build::BindMount>,
@@ -119,6 +122,9 @@ impl Config {
             data_dir: core.data_dir.clone(),
             git_ssh_key: env_opt("WORKER_GIT_SSH_KEY").map(PathBuf::from),
             ssh_known_hosts: env_opt("WORKER_SSH_KNOWN_HOSTS").map(PathBuf::from),
+            named_ssh_keys: env_opt("WORKER_GIT_SSH_KEYS")
+                .map(|raw| crate::credentials::parse_named_keys(&raw))
+                .unwrap_or_default(),
             bind_mounts: env_opt("WORKER_BIND_MOUNTS")
                 .map(|raw| crate::credentials::parse_bind_mounts(&raw))
                 .unwrap_or_default(),
