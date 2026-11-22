@@ -5,9 +5,7 @@ use crate::settings;
 use crate::snapshot::SnapshotStore;
 use crate::vcs_check::job_vcs_sources;
 use aurcache_common::digest::sha256_hex;
-use aurcache_common::worker::{
-    JobDescriptor, MirrorlistOffer, MirrorlistPreference, SshKeyRequest,
-};
+use aurcache_common::worker::{JobDescriptor, MirrorlistOffer, MirrorlistPreference};
 use aurcache_db::builds;
 use aurcache_db::prelude::Packages;
 use sea_orm::{DatabaseConnection, EntityTrait};
@@ -116,12 +114,12 @@ pub async fn descriptor(
 /// quietly, as it does for every job of a server that names no keys. Any
 /// other name is sent, and a worker that does not hold it says so in the
 /// build log.
-async fn ssh_key(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<Option<SshKeyRequest>> {
+async fn ssh_key(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<Option<String>> {
     let name = settings::get(db, settings::key::BUILD_SSH_KEY, Some(pkg_id))
         .await?
         .value
         .0;
-    Ok((name != aurcache_common::ssh_key::DEFAULT).then_some(SshKeyRequest { name: Some(name) }))
+    Ok((name != aurcache_common::ssh_key::DEFAULT).then_some(name))
 }
 
 /// Decide what to put in a job descriptor for the mirrorlist.
@@ -162,7 +160,7 @@ mod tests {
     use crate::settings::{Change, write};
     use crate::snapshot::SnapshotStore;
     use aurcache_common::settings::Setting;
-    use aurcache_common::worker::{MirrorlistOffer, MirrorlistPreference, SshKeyRequest};
+    use aurcache_common::worker::{MirrorlistOffer, MirrorlistPreference};
     use aurcache_db::testing::{build, memory_db, package};
     use sea_orm::ActiveValue::Set;
     use std::collections::BTreeMap;
@@ -221,12 +219,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            ssh_key(&db, 1).await.unwrap(),
-            Some(SshKeyRequest {
-                name: Some("gitlab".to_string())
-            })
-        );
+        assert_eq!(ssh_key(&db, 1).await.unwrap(), Some("gitlab".to_string()));
         assert_eq!(ssh_key(&db, 2).await.unwrap(), None);
 
         // Named outright, the default is still left out.
