@@ -385,11 +385,13 @@ that directory is bound into its chroot, so it can use the key it was offered
 and no other, through neither the same agent nor the same mount.
 
 **The decision is the chroot worker's.** `aurcache_worker::ssh_key::offer(job,
-&keys) -> SshOffer`, `keys` being the sockets of the agents the worker
-started, by key name, says:
-`Offered { name, key }`, `NotHeld { name }` for a name the worker does not
-hold, or `NoKey` for the default on a worker that holds none. An offer and a missing named key each have their own line in
-the build log, written before anything is prepared.
+&keys, named_keys_held) -> SshOffer`, `keys` being the sockets of the agents
+the worker started, by key name, says: `Offered { name, key }`,
+`NotHeld { name }` for a name the worker does not hold, `Withheld { name }`
+for a named key once the worker has stopped the named keys' agents (below),
+or `NoKey` for the default on a worker that holds none. An offer, a missing
+named key and a withheld one each have their own line in the build log,
+written before anything is prepared.
 
 A name the worker does not hold builds without a key. Most builds of a package
 never use the key it names, so failing them for its absence would fail builds
@@ -445,9 +447,13 @@ really is (a directory spelled beneath a protected one, through a symlink or
 `..`, may be anywhere); otherwise `no-resolve-unix: ` and which of those
 failed, which the worker logs. The worker creates the directory before it
 asks, and asks again before each build while it holds named keys: a policy
-edited or a sandbox replaced under it changes the answer, and a build whose
-package names a key then goes ahead without it, with the log saying why once
-per change. Reading the policy as the build user is the point: that user cannot
+edited or a sandbox replaced under it changes the answer. On the first answer
+that is not `resolve-unix`, or a question that fails, the worker stops the
+named keys' agents (`agent::NamedKeysGate` owns them), which removes their
+sockets, and logs why once: withholding a key only from the build that names
+it would leave every other build's PKGBUILD code able to reach its agent by
+path. It holds no named key again until it restarts, and a build whose
+package names one goes ahead without it. Reading the policy as the build user is the point: that user cannot
 read a policy at `0600 root`, and a check made with the worker's rights
 would pass where the sandbox's would not. The sandbox refuses a build
 outright whenever its policy file exists but cannot be read, so such a
