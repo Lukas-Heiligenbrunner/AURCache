@@ -34,7 +34,7 @@ use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_common::worker::{
     BuildOutcome, ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor,
     JobVcsSource, MirrorlistOffer, MirrorlistPreference, PROTOCOLS, ProtocolRange, RegisterRequest,
-    RegisterStatus, SshKeyRequest, WorkerLogReport,
+    RegisterStatus, WorkerLogReport,
 };
 use aurcache_common::worker_config::{
     Applies, ConfigSnapshot, EffectiveConfig, EffectiveSetting, EffectiveSource, SettingDecl,
@@ -191,13 +191,11 @@ fn job_descriptor(mirrorlist: MirrorlistOffer) -> JobDescriptor {
     }
 }
 
-/// A job naming its SSH key, or saying it has none.
-fn job_with_ssh_key(name: Option<&str>) -> JobDescriptor {
+/// A job naming its SSH key.
+fn job_with_ssh_key(name: &str) -> JobDescriptor {
     JobDescriptor {
         timeout_secs: Some(3600),
-        ssh_key: Some(SshKeyRequest {
-            name: name.map(str::to_string),
-        }),
+        ssh_key: Some(name.to_string()),
         ..job_descriptor(MirrorlistOffer::Keep)
     }
 }
@@ -254,11 +252,7 @@ fn protocol_1_messages_still_decode() {
             job_descriptor(MirrorlistOffer::Nothing),
         ],
     );
-    check(
-        "1",
-        "job_descriptor_ssh_key",
-        &[job_with_ssh_key(Some("default")), job_with_ssh_key(None)],
-    );
+    check("1", "job_descriptor_ssh_key", &[job_with_ssh_key("gitlab")]);
     check(
         "1",
         "heartbeat",
@@ -338,8 +332,8 @@ fn registration_messages_still_decode() {
     );
 }
 
-/// A job from a server that sends no `ssh_key` reads as naming nothing --
-/// absent, not "no key" -- which tells a worker to offer its default key.
+/// A job from a server that sends no `ssh_key` reads as naming nothing, which
+/// tells a worker to offer its default key.
 #[test]
 fn a_job_without_an_ssh_key_field_reads_as_absent() {
     let text = std::fs::read_to_string(fixtures("1").join("job_descriptor.json")).unwrap();
@@ -351,11 +345,8 @@ fn a_job_without_an_ssh_key_field_reads_as_absent() {
 
     let text = std::fs::read_to_string(fixtures("1").join("job_descriptor_ssh_key.json")).unwrap();
     let jobs: Vec<JobDescriptor> = serde_json::from_str(&text).unwrap();
-    let names: Vec<_> = jobs
-        .into_iter()
-        .map(|job| job.ssh_key.map(|key| key.name))
-        .collect();
-    assert_eq!(names, vec![Some(Some("default".to_string())), Some(None)]);
+    let names: Vec<_> = jobs.into_iter().map(|job| job.ssh_key).collect();
+    assert_eq!(names, vec![Some("gitlab".to_string())]);
 }
 
 /// The fixtures cover every protocol this crate speaks.
