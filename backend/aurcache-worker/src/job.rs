@@ -11,7 +11,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ssh_key::{self, SshOffer};
+use crate::ssh_key;
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::ClaimedJob;
@@ -90,22 +90,11 @@ async fn run_job_inner(
     let job = &claimed.job;
     // Decided before anything is prepared and said first in the build log, so
     // a fetch that fails for want of a key has the reason above it.
-    let mut ssh = ssh_key::offer(job, &shared.ssh_keys);
-    let mut notice = ssh.notice(&job.pkgbase);
-    // Asked before every build, so the worker's log says at once when the
-    // named keys' agents stop being kept from builds.
-    if !shared.named_keys_held().await
-        && let SshOffer::Offered { name, .. } = &ssh
-        && name != aurcache_common::ssh_key::DEFAULT
-    {
-        notice = Some(format!(
-            "SSH key {name:?} withheld: builds are no longer kept from its agent outside \
-             their chroot (the worker's log says why); building without one"
-        ));
-        ssh = SshOffer::NoKey;
-    }
+    // Asked as every build starts, so the named keys' agents are stopped at
+    // the first build start after builds stop being kept from them.
+    let ssh = ssh_key::offer(job, &shared.ssh_keys, shared.named_keys_held().await);
     tracing::debug!("build {} of {}: {ssh:?}", job.build_id, job.pkgbase);
-    if let Some(notice) = notice {
+    if let Some(notice) = ssh.notice(&job.pkgbase) {
         log(client, job.build_id, &format!("[worker] {notice}\n")).await;
     }
     let ssh_agent = ssh.key().map(PathBuf::as_path);
@@ -1318,7 +1307,7 @@ mod tests {
             aurcache_common::ssh_key::DEFAULT.to_string(),
             socket.to_path_buf(),
         )]);
-        let ssh = ssh_key::offer(&job, &keys);
+        let ssh = ssh_key::offer(&job, &keys, true);
         let agent = ssh.key().map(PathBuf::as_path);
         let staged =
             credentials::stage_for_job(None, &socket.with_extension("secrets"), agent).unwrap();
@@ -1355,7 +1344,7 @@ mod tests {
         }
         let bound = |ssh_key| {
             let job = job_asking_for(ssh_key);
-            let ssh = ssh_key::offer(&job, &keys);
+            let ssh = ssh_key::offer(&job, &keys, true);
             agent_bind(ssh.key().map(PathBuf::as_path)).map(|bind| bind.host)
         };
         let gitlab = bound(Some("gitlab"));
