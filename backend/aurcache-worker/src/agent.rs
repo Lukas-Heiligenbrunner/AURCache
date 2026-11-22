@@ -22,6 +22,14 @@
 //! pick it up. Starting it here removes both: one mechanism, after the key is
 //! ensured, on every platform.
 //!
+//! ## One agent per key
+//!
+//! Each key the worker holds -- `default`, and every one `WORKER_GIT_SSH_KEYS`
+//! names -- is in an agent of its own, with its socket in a directory of its
+//! own. A build is handed one socket and has that one directory bound into its
+//! chroot, so it can use exactly the key it was offered and never reach
+//! another through the same agent or the same mount.
+//!
 //! ## What a build can and cannot do with it
 //!
 //! It can ask the agent to authenticate, for anything, for as long as the build
@@ -43,10 +51,18 @@ use tokio::process::{Child, Command};
 const AGENT_DIR: &str = "agent";
 const SOCKET_FILE: &str = "agent.sock";
 
-/// The directory the agent's socket lives in, under the worker's data
-/// directory -- never in the storage pool, so no kept build can hold it.
+/// The directory the agents' sockets live in, each in a directory of its own
+/// below it, under the worker's data directory -- never in the storage pool,
+/// so no kept build can hold one.
 pub fn dir(data_dir: &Path) -> PathBuf {
     data_dir.join(AGENT_DIR)
+}
+
+/// The directory of the agent holding the key `name`: what a build offered
+/// that key has bound into its chroot, and nothing beside it.
+#[must_use]
+pub fn key_dir(data_dir: &Path, name: &str) -> PathBuf {
+    dir(data_dir).join(name)
 }
 
 /// The group shared by the worker and the users it builds as.
@@ -60,11 +76,18 @@ const BUILD_GROUP: &str = "aurbuild";
 /// Killed when dropped, so the agent's lifetime is the worker's and no stray
 /// agent survives a restart holding a key.
 pub struct BuildAgent {
+    name: String,
     socket: PathBuf,
     child: Child,
 }
 
 impl BuildAgent {
+    /// The name of the key it holds.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// The socket path, for `SSH_AUTH_SOCK` and for the chroot bind mount.
     #[must_use]
     pub fn socket(&self) -> &Path {
@@ -103,19 +126,27 @@ impl Drop for BuildAgent {
 /// gains is the ability to *use* the key while the agent lives, which is the
 /// whole point, and an agent does not give back what it holds.
 ///
-/// Returns `None` when there is no key to load, which is the ordinary case for
-/// a worker that builds nothing needing authentication.
-pub async fn start(data_dir: &Path, key: &Path, build_user: &str) -> Result<Option<BuildAgent>> {
+/// The agent holds the key `name` (a key name, which the caller has checked)
+/// in [`key_dir`]. Returns `None` when there is no key to load, which is the
+/// ordinary case for a worker that builds nothing needing authentication.
+pub async fn start(
+    data_dir: &Path,
+    name: &str,
+    key: &Path,
+    build_user: &str,
+) -> Result<Option<BuildAgent>> {
     if !key.exists() {
         return Ok(None);
     }
 
-    let dir = dir(data_dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    // Group-writable, because the process creating the socket in here is the
-    // build user rather than us. Both are in `aurbuild`; nobody else reaches
-    // the directory, and the key is not in it at all.
-    set_group_and_mode(&dir, 0o770)?;
+    let dir = key_dir(data_dir, name);
+    // Both levels group-writable, because the process creating the socket is
+    // the build user rather than us. Both are in `aurbuild`; nobody else
+    // reaches the directories, and no key is in them at all.
+    for dir in [self::dir(data_dir), dir.clone()] {
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        set_group_and_mode(&dir, 0o770)?;
+    }
 
     let socket = dir.join(SOCKET_FILE);
     // A socket left by a previous run: ssh-agent refuses to bind over it.
@@ -146,7 +177,11 @@ pub async fn start(data_dir: &Path, key: &Path, build_user: &str) -> Result<Opti
         .await
         .context("loading the build credential into the agent")?;
 
-    Ok(Some(BuildAgent { socket, child }))
+    Ok(Some(BuildAgent {
+        name: name.to_string(),
+        socket,
+        child,
+    }))
 }
 
 /// Write `material` into the running agent through `ssh-add -`.
@@ -293,13 +328,14 @@ pub const SANDBOX_POLICY: &str = "/etc/aurcache/sandbox-protected";
 /// sockets (`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, Linux 7.1).
 const RESOLVE_UNIX_ABI: libc::c_long = 9;
 
-/// How far a build that is not offered the key is kept from the agent, on
+/// Whether a build is kept from the agents of the keys it is not offered, on
 /// this machine.
 ///
-/// Inside its chroot it never is: the agent's directory is mounted only into
-/// the chroot of a build offered the key. Outside it -- the PKGBUILD code
-/// `makechrootpkg` runs on the worker -- it is the sandbox that refuses the
-/// socket, which takes a kernel that can and a policy that names the agent.
+/// Inside its chroot it always is: only the directory of the agent it is
+/// offered is mounted there. Outside it -- the PKGBUILD code `makechrootpkg`
+/// runs on the worker -- it is the sandbox that refuses every other socket,
+/// which takes a kernel that can and a policy that names the agents'
+/// directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostSideGate {
     /// Refused outside the chroot as well.
@@ -384,16 +420,22 @@ mod tests {
         ));
     }
 
-    /// The bind mount is the directory, not the socket: the socket's inode is
-    /// replaced whenever the agent restarts, and a bind to the old one would
-    /// survive as a broken mount.
+    /// The bind mount is the key's directory, not the socket: the socket's
+    /// inode is replaced whenever the agent restarts, and a bind to the old
+    /// one would survive as a broken mount. Each key has its own, below the
+    /// one the sandbox's policy protects.
     #[test]
-    fn the_bind_target_is_the_directory() {
-        let agent = PathBuf::from("/var/lib/aurcache-worker/agent/agent.sock");
+    fn each_key_has_a_directory_of_its_own() {
+        let data = Path::new("/var/lib/aurcache-worker");
+        let socket = key_dir(data, "gitlab").join(SOCKET_FILE);
         assert_eq!(
-            agent.parent().unwrap(),
-            Path::new("/var/lib/aurcache-worker/agent")
+            socket.parent().unwrap(),
+            Path::new("/var/lib/aurcache-worker/agent/gitlab")
         );
+        assert_ne!(key_dir(data, "gitlab"), key_dir(data, "default"));
+        for name in ["gitlab", "default"] {
+            assert!(key_dir(data, name).starts_with(dir(data)));
+        }
     }
 
     /// A worker with no credential is the ordinary case and must not fail.
@@ -402,7 +444,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope");
         assert!(
-            start(dir.path(), &missing, "builder")
+            start(dir.path(), "default", &missing, "builder")
                 .await
                 .unwrap()
                 .is_none()
