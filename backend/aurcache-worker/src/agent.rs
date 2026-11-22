@@ -140,13 +140,8 @@ pub async fn start(
     }
 
     let dir = key_dir(data_dir, name);
-    // Both levels group-writable, because the process creating the socket is
-    // the build user rather than us. Both are in `aurbuild`; nobody else
-    // reaches the directories, and no key is in them at all.
-    for dir in [self::dir(data_dir), dir.clone()] {
-        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        set_group_and_mode(&dir, 0o770)?;
-    }
+    ensure_dir(data_dir)?;
+    make_group_dir(&dir)?;
 
     let socket = dir.join(SOCKET_FILE);
     // A socket left by a previous run: ssh-agent refuses to bind over it.
@@ -182,6 +177,23 @@ pub async fn start(
         socket,
         child,
     }))
+}
+
+/// Create the directory the agents' sockets live in, [`dir`], if it is not
+/// there yet.
+///
+/// Before the sandbox is asked about it, too, which judges it where it really
+/// is and so needs it to exist.
+pub fn ensure_dir(data_dir: &Path) -> Result<()> {
+    make_group_dir(&dir(data_dir))
+}
+
+/// Create `dir`, group-writable, because the process creating the socket is
+/// the build user rather than us. It is in `aurbuild`; nobody else reaches
+/// it, and no key is in it at all.
+fn make_group_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    set_group_and_mode(dir, 0o770)
 }
 
 /// Write `material` into the running agent through `ssh-add -`.
@@ -360,29 +372,101 @@ pub enum HostSideGate {
     Unanswered { why: String },
 }
 
+impl HostSideGate {
+    /// Why builds are not kept from the agents outside their chroot, as a
+    /// clause for the log; `None` when they are.
+    #[must_use]
+    pub fn gap(&self) -> Option<String> {
+        match self {
+            Self::Enforced => None,
+            Self::SandboxDeclines { why } => Some(format!(
+                "aurcache-sandbox, asked as the build user, says it would not: {why}"
+            )),
+            Self::Unanswered { why } => Some(format!(
+                "aurcache-sandbox could not be asked whether it would, as the build user: {why}"
+            )),
+        }
+    }
+}
+
+/// The sandbox's answer for a worker holding named keys, asked again before
+/// each build: a policy file edited or a sandbox package replaced under a
+/// running worker changes it.
+pub struct NamedKeysGate {
+    /// The question, as [`sandbox_capabilities`] puts it.
+    ask: Box<dyn Fn() -> Command + Send + Sync>,
+    /// The last answer, so the log says when it changes, once.
+    last: std::sync::Mutex<HostSideGate>,
+}
+
+impl NamedKeysGate {
+    /// For named keys held because the sandbox answered
+    /// [`HostSideGate::Enforced`] for `build_user`'s builds and the agents
+    /// under `data_dir`.
+    #[must_use]
+    pub fn new(build_user: &str, data_dir: &Path) -> Self {
+        let build_user = build_user.to_string();
+        let data_dir = data_dir.to_path_buf();
+        Self::asking(move || sandbox_capabilities(&build_user, &data_dir))
+    }
+
+    fn asking(ask: impl Fn() -> Command + Send + Sync + 'static) -> Self {
+        Self {
+            ask: Box::new(ask),
+            last: std::sync::Mutex::new(HostSideGate::Enforced),
+        }
+    }
+
+    /// Whether builds are still kept from the agents outside their chroot,
+    /// asked of the sandbox now. The log says so when the answer is not the
+    /// last one.
+    pub async fn holds(&self) -> bool {
+        let gate = host_side_gate((self.ask)()).await;
+        let changed = {
+            let mut last = self
+                .last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let changed = *last != gate;
+            last.clone_from(&gate);
+            changed
+        };
+        if changed {
+            match gate.gap() {
+                None => tracing::info!(
+                    "Builds are refused the agents of the SSH keys they are not offered outside \
+                     their chroot again; builds are offered the named keys their packages name"
+                ),
+                Some(gap) => tracing::error!(
+                    "Builds can no longer be kept from the agents of the named SSH keys outside \
+                     their chroot, because {gap}: a build whose package names one goes ahead \
+                     without it until they can"
+                ),
+            }
+        }
+        gate == HostSideGate::Enforced
+    }
+}
+
 /// What the sandbox answers `query` ([`sandbox_capabilities`]), as a
 /// [`HostSideGate`].
+///
+/// The sandbox answers with success whatever its answer, so a failure is its
+/// own or that of `sudo` running it, given as the status and what it printed.
+/// One that predates the question refuses it as a usage error, status 2.
 pub async fn host_side_gate(query: Command) -> HostSideGate {
-    let via_sudo = Path::new(query.as_std().get_program()).file_name() == Some("sudo".as_ref());
     let out = match query_output(query).await {
         Ok(out) => out,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let what = if via_sudo { "sudo" } else { SANDBOX };
-            return HostSideGate::Unanswered {
-                why: format!("{what} is not installed, or not on this worker's PATH"),
-            };
-        }
         Err(e) => {
             return HostSideGate::Unanswered {
                 why: format!("{SANDBOX} {CAPABILITIES_ARG} could not run: {e}"),
             };
         }
     };
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let stderr = stderr.trim();
     if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
         return HostSideGate::Unanswered {
-            why: refusal(out.status, stderr, via_sudo),
+            why: format!("{}: {}", out.status, stderr.trim()),
         };
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -419,31 +503,6 @@ async fn query_output(mut query: Command) -> std::io::Result<std::process::Outpu
         .await
 }
 
-/// Why the question failed with `status`, by what that status means.
-///
-/// The sandbox answers with success whatever its answer; it fails only on a
-/// usage error, which is how one that predates the question refuses it. Run
-/// through `sudo`, a failure of sudo's own -- the sandbox not on its `PATH`,
-/// or no rule letting the worker run it as the build user -- is status 1,
-/// which the sandbox never exits with here; its message says which.
-fn refusal(status: std::process::ExitStatus, stderr: &str, via_sudo: bool) -> String {
-    match status.code() {
-        Some(2) => format!(
-            "{SANDBOX} refused {CAPABILITIES_ARG} as a usage error, as one that predates the \
-             question does (update the aurcache-sandbox package): {stderr}"
-        ),
-        Some(127) => format!("{SANDBOX} was not found: {stderr}"),
-        Some(1) if via_sudo && stderr.contains("command not found") => format!(
-            "{SANDBOX} is not on sudo's PATH (install the aurcache-sandbox package): {stderr}"
-        ),
-        Some(1) if via_sudo => format!(
-            "sudo would not run {SANDBOX} as the build user (the worker may run commands as \
-             that user without a password, as makechrootpkg does): {stderr}"
-        ),
-        _ => format!("{SANDBOX} {CAPABILITIES_ARG} failed ({status}): {stderr}"),
-    }
-}
-
 /// The command asking the `aurcache-sandbox` that confines `build_user`'s
 /// builds whether it would keep them from the agents under `data_dir`.
 ///
@@ -473,20 +532,6 @@ pub fn sandbox_capabilities(build_user: &str, data_dir: &Path) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The policy the packages ship lists the agents' directory of a worker
-    /// in its default data directory, which is what the sandbox is asked
-    /// about.
-    #[test]
-    fn the_shipped_policy_lists_the_default_agents_directory() {
-        let policy = include_str!("../../../packaging/sandbox-protected");
-        let agents = dir(Path::new("/var/lib/aurcache-worker"));
-        assert!(
-            policy.lines().any(|line| Path::new(line.trim()) == agents),
-            "packaging/sandbox-protected must list {}",
-            agents.display()
-        );
-    }
 
     /// The worker's copies of what it asks the sandbox are the sandbox's own
     /// definitions, so the two cannot drift apart unnoticed.
@@ -550,52 +595,43 @@ mod tests {
         }
     }
 
-    /// A question that fails says why by how it failed: a sandbox that
-    /// predates it, a sandbox or sudo that is not installed, and sudo that
-    /// will not run it as the build user.
+    /// A question that fails gives no answer to go by, and says how it
+    /// failed: a sandbox that predates it, and one that is not there.
     #[tokio::test]
     async fn a_failed_question_says_how_it_failed() {
-        let old = why(gate(
-            "echo 'aurcache-sandbox: expected `--allow-build-env`' >&2; \
-             echo 'usage: aurcache-sandbox --allow-build-env -- PROGRAM [ARGS]...' >&2; exit 2",
-        )
-        .await);
-        assert!(old.contains("usage error"), "{old}");
+        let old =
+            why(gate("echo 'aurcache-sandbox: expected `--allow-build-env`' >&2; exit 2").await);
+        assert!(old.contains("exit status: 2"), "{old}");
         assert!(old.contains("expected `--allow-build-env`"), "{old}");
-        assert!(!old.contains("sudo"), "{old}");
 
-        let missing = why(host_side_gate(Command::new("/nonexistent/aurcache-sandbox")).await);
+        let missing = host_side_gate(Command::new("/nonexistent/aurcache-sandbox")).await;
         assert!(
-            missing.contains("aurcache-sandbox is not installed"),
-            "{missing}"
+            matches!(&missing, HostSideGate::Unanswered { why } if why.contains("could not run")),
+            "{missing:?}"
         );
-        let missing = why(gate("echo 'aurcache-sandbox: not found' >&2; exit 127").await);
-        assert!(missing.contains("was not found"), "{missing}");
+    }
 
-        let other = why(gate("echo boom >&2; exit 1").await);
-        assert!(
-            other.contains("failed") && other.contains("boom"),
-            "{other}"
-        );
-        assert!(!other.contains("sudo"), "{other}");
-
-        // As through sudo: a shell by sudo's name, failing the way sudo does.
-        let bin = tempfile::tempdir().unwrap();
-        let sudo = bin.path().join("sudo");
-        std::os::unix::fs::symlink("/bin/sh", &sudo).unwrap();
-        let run_sudo = |stderr: &str| {
-            let mut query = Command::new(&sudo);
-            query.args(["-c", &format!("echo '{stderr}' >&2; exit 1")]);
-            host_side_gate(query)
-        };
-        let refused = why(run_sudo("sudo: a password is required").await);
-        assert!(refused.contains("sudo would not run"), "{refused}");
-        assert!(refused.contains("a password is required"), "{refused}");
-        let unfound = why(run_sudo("sudo: aurcache-sandbox: command not found").await);
-        assert!(unfound.contains("not on sudo's PATH"), "{unfound}");
-
-        let no_sudo = why(host_side_gate(Command::new(bin.path().join("missing/sudo"))).await);
-        assert!(no_sudo.contains("sudo is not installed"), "{no_sudo}");
+    /// Asked again, the gate holds only while the sandbox still answers
+    /// `resolve-unix`, and holds again once it does.
+    #[tokio::test]
+    async fn the_named_keys_gate_follows_the_latest_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = dir.path().join("answer");
+        let script = answer.clone();
+        let gate = NamedKeysGate::asking(move || {
+            let mut query = Command::new("cat");
+            query.arg(&script);
+            query
+        });
+        std::fs::write(&answer, "resolve-unix\n").unwrap();
+        assert!(gate.holds().await);
+        std::fs::write(&answer, "no-resolve-unix: policy misses the agents (x)\n").unwrap();
+        assert!(!gate.holds().await);
+        assert!(!gate.holds().await);
+        std::fs::remove_file(&answer).unwrap();
+        assert!(!gate.holds().await);
+        std::fs::write(&answer, "resolve-unix\n").unwrap();
+        assert!(gate.holds().await);
     }
 
     /// The question goes to the sandbox builds find, as the build user, and

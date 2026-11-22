@@ -228,17 +228,23 @@ also when:
   names a path under a directory that does not exist. Either way no build
   starts at all, not only those naming a key. Keep the file readable by
   everyone: it lists paths, not secrets.
-- that file is missing, lists nothing, or does not list the agents'
-  directory, `<WORKER_DATA_DIR>/agent`.
+- that file is missing, lists nothing, or does not protect the agents'
+  directory, `<WORKER_DATA_DIR>/agent`, where it really is: listing it, or a
+  directory above where it really is, does.
 
-The log says which. It also says when the sandbox could not be asked: an
-`aurcache-sandbox` too old to know the question (update the package), one
-that is not installed, or `sudo` refusing to run it as the build user. Where
-the worker holds named keys, it says:
+The log says which. When the sandbox could not be asked, it gives how the
+question failed and what was printed: an `aurcache-sandbox` too old to know
+the question (update the package) refuses it as a usage error, exit status 2.
+Where the worker holds named keys, it says:
 
 ```
 INFO Builds are refused the agents of the SSH keys they are not offered outside their chroot as well (Landlock)
 ```
+
+It asks again before each build. Should the answer change, as with the
+policy file edited or the sandbox package replaced under a running worker, a
+build whose package names a key goes ahead without it, with a line in its
+log, and the worker's log says why once.
 :::
 
 ## Host keys
