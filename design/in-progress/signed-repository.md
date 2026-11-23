@@ -318,13 +318,16 @@ public key is served.
 
 ### Backups
 
-**Decided: the key is never in a dump**, with secrets or without
-(`DumpSecrets`' doc, a test in `aurcache-utils/tests/dump.rs`). A dump with
-secrets already carries the worker CA, but the signing key is worse to leak:
-every client that trusts it installs, as root, whatever it signs, from
-anywhere, for as long as it is trusted — long after the instance a dump came
-from is gone. It moves as the file it is, copied on purpose; the docs tell
-operators to back it up with the CA directory.
+**Built: the key is in a dump with secrets**, as the file the server signs
+with, byte for byte: locked if it is, never with its passphrase. A restore
+taking secrets checks it first — it must unlock with this server's
+passphrase, not have expired and sign — and refuses the whole restore
+otherwise. A supplied key is never written; a key file already holding the
+dump's bytes is left alone. Otherwise, after the rows commit, the old file is
+kept as `signing-key.asc.replaced-<hash of its bytes>` and the new one renamed in.
+The server loads its key at start, as it loads the CA, so the restored key
+signs from the next start, and the backfill then re-signs what the old key
+signed.
 
 ### Turning it on
 
