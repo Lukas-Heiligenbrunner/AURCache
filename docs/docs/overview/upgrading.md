@@ -35,6 +35,40 @@ several releases is each of their sections in turn, oldest first.
   Make an existing one `0700`, owned by the worker's user. The hybrid image no
   longer creates it beforehand.
 
+### How the Docker worker builds
+
+This applies to the hybrid image's embedded worker and to any Docker worker,
+whether it comes from 0.5 or from 0.6. The Docker worker now runs each build
+with a build agent it puts in the build directory. The agent prepares the
+container as root, then runs makepkg as an unprivileged user. Packages that
+built before still build, but some things change:
+
+- **Build code has no `sudo`.** The container has no capabilities beyond the
+  few the agent needs, and it sets `no-new-privileges`. A PKGBUILD that runs
+  `sudo` itself now fails. Dependencies are still installed, by the agent
+  before the build, as on the chroot worker.
+- **A failure before makepkg is the worker's, not the package's.** If the image
+  upgrade (`pacman -Sy`, then `pacman -Su`) fails, for example because a
+  mirror is down, the server ends the build and queues a new one while the
+  package has attempts left. It no longer fails the package. A dependency
+  that cannot be installed still does. A PGP key that
+  cannot be fetched is noted in the build log and the build goes on, as on
+  the chroot worker.
+- **Every build starts from a fresh tree.** The persistent build directory
+  setting has no effect on this worker.
+- **`BUILD_ARTIFACT_DIR` must allow executing.** The agent is run from the
+  build directory, so one on a filesystem mounted `noexec` fails every build
+  as its container starts.
+- **`/dev/shm` follows the memory limit.** It is as large as `MEMORY_LIMIT`, or
+  2 GiB when no limit is set, where Docker's default is 64 MiB.
+- **A custom `BUILDER_IMAGE`** needs pacman, makepkg, gpg and `find`. It no longer needs
+  `sudo` or an `ab` user. An image that worked before still works.
+- **Foreign architectures no longer need qemu's `C` flag.** A binfmt handler
+  registered for `sudo` to work under emulation can stay as it is.
+
+The builder image itself has not changed, so a worker that has not been
+upgraded yet keeps building with the same image.
+
 ## From 0.5 {#from-0-5}
 
 An instance set up from the 0.5 docs upgrades by changing the image line and
