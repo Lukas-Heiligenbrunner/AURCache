@@ -229,7 +229,8 @@ also when:
   - it is anything but a regular file;
   - it is, or is reached through, a symlink to nothing;
   - it is larger than 1 MiB;
-  - or it names a path under a directory that does not exist.
+  - it names a path under a directory that does not exist;
+  - or it names `/`, or a path that resolves to it.
 
   No build starts at all then, not only those naming a key. Keep the file
   readable by everyone: it lists paths, not secrets.

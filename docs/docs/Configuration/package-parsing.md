@@ -63,4 +63,5 @@ Set it on the Settings page, or in the environment.
 (colon-separated). It adds to the list above rather than replacing it. In the
 container images these must be closed to other users too. Naming `/`, or a
 path that resolves to it, refuses every parse: a parse that can read nothing
-cannot run.
+cannot run. Don't put an inline comment after it in an environment file:
+systemd keeps it as part of the value.

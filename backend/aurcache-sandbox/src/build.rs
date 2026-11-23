@@ -397,7 +397,9 @@ fn resolve_unix_supported() -> bool {
 /// Read the deployment's protected-path list, if it has one.
 ///
 /// A missing file means "protect nothing", which is the correct default for a
-/// worker with no secrets on disk. Blank lines and `#` comments are ignored.
+/// worker with no secrets on disk. Blank lines and comments are ignored: as in
+/// a shell, a `#` at the start of a line or after whitespace begins one, and a
+/// `#` within a path, as in `/srv/a#b`, is part of it.
 ///
 /// A file that exists but cannot be read is an error, never an empty list: a
 /// policy at `0600 root` reads as missing to the build user this runs as, and
@@ -421,8 +423,14 @@ fn protected_paths(file: &Path) -> Result<Vec<PathBuf>, String> {
     };
     let listed: Vec<PathBuf> = contents
         .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let comment = line
+                .match_indices('#')
+                .map(|(at, _)| at)
+                .find(|&at| at == 0 || line[..at].ends_with(char::is_whitespace));
+            line[..comment.unwrap_or(line.len())].trim()
+        })
+        .filter(|line| !line.is_empty())
         .map(PathBuf::from)
         .collect();
     crate::exclusions(&listed).map_err(|root| {
@@ -949,6 +957,34 @@ mod tests {
             vec![
                 PathBuf::from("/var/lib/aurcache-worker/ssh"),
                 PathBuf::from("/etc/aurcache/identity"),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Comments are read as a shell reads them: from a `#` at the start of a
+    /// line or after a space or tab, but not from one within a path.
+    #[test]
+    fn comments_start_where_a_shell_starts_them() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-inline-comment-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("list");
+        std::fs::write(
+            &file,
+            "# secrets\n/var/lib/aurcache-worker/ssh  # the key\n/etc/aurcache/identity\t#id\n\
+             /srv/a#b\n  \t# only a comment\n",
+        )
+        .unwrap();
+        assert_eq!(
+            protected_paths(&file).unwrap(),
+            vec![
+                PathBuf::from("/var/lib/aurcache-worker/ssh"),
+                PathBuf::from("/etc/aurcache/identity"),
+                PathBuf::from("/srv/a#b"),
             ]
         );
         std::fs::remove_dir_all(&dir).ok();
