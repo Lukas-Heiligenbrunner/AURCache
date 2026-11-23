@@ -243,13 +243,21 @@ fn agent_sockets(
     AgentSockets::Refused
 }
 
-/// Whether `protected` keeps builds out of `dir`: one of its paths is `dir`
-/// or a parent of it, as written or where it really is.
+/// Whether `protected` keeps builds out of `dir`: where `dir` really is, it
+/// is one of its paths, where that really is, or beneath one.
+///
+/// Judged by real paths alone, as a rule applies to what a path resolves to:
+/// `dir` spelled beneath a protected path -- through a symlink out of it, or
+/// with `..` -- may be anywhere. A path that cannot be resolved protects
+/// nothing, and a `dir` that cannot be is not protected.
 fn protects(protected: &[PathBuf], dir: &Path) -> bool {
-    let real = std::fs::canonicalize(dir).ok();
+    let Ok(real) = std::fs::canonicalize(dir) else {
+        return false;
+    };
     protected
         .iter()
-        .any(|path| dir.starts_with(path) || real.as_ref().is_some_and(|r| r.starts_with(path)))
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .any(|path| real.starts_with(path))
 }
 
 /// What `--capabilities` prints for `sockets`: one line, the capability or
@@ -260,13 +268,14 @@ fn capability_line(sockets: &AgentSockets) -> String {
         AgentSockets::KernelCannot => "kernel (this kernel's Landlock cannot restrict UNIX \
                                        sockets: that takes Landlock ABI 9, Linux 7.1 or later)"
             .to_string(),
+        AgentSockets::BadPolicy(e) => format!("bad policy ({e})"),
         AgentSockets::NothingProtected => format!(
             "no policy ({PROTECTED_PATHS_FILE} is missing or lists nothing, so builds \
-              are not kept from any path)"
+             are not kept from any path)"
         ),
-        AgentSockets::BadPolicy(e) => format!("bad policy ({e})"),
         AgentSockets::AgentsUnprotected(agents) => format!(
-            "policy misses the agents ({PROTECTED_PATHS_FILE} does not list {}; add it)",
+            "policy misses the agents ({PROTECTED_PATHS_FILE} lists neither {} nor a \
+             directory above it, where it really is; add it, and create it if it is missing)",
             agents.display()
         ),
     };
@@ -760,6 +769,31 @@ mod tests {
             &dir.join("link/agent")
         ));
         assert!(!protects(&[dir.join("real/ssh")], &dir.join("link/agent")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Spelled beneath a protected path, the agents' directory is not
+    /// protected where it really is elsewhere: a symlink out of a listed
+    /// directory, or `..` out of one. Nor is one that does not exist.
+    #[test]
+    fn the_agents_directory_is_not_judged_by_its_spelling() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-agents-spelling-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("w/agent")).unwrap();
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("w/agent2")).unwrap();
+
+        assert!(protects(&[dir.join("w")], &dir.join("w/agent")));
+        assert!(!protects(&[dir.join("w")], &dir.join("w/agent2")));
+        assert!(!protects(
+            &[dir.join("w/agent")],
+            &dir.join("w/agent/../../elsewhere")
+        ));
+        assert!(!protects(&[dir.join("w")], &dir.join("w/missing")));
         std::fs::remove_dir_all(&dir).ok();
     }
 
