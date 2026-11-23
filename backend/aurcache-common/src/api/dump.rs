@@ -37,6 +37,9 @@ pub const CA_CERT_FILE: &str = "ca-cert.pem";
 pub const CA_KEY_FILE: &str = "ca-key.pem";
 /// API token hashes, present only in a dump taken with secrets.
 pub const TOKENS_FILE: &str = "tokens.json";
+/// The repository's signing key, as the server stores it, present only in a
+/// dump taken with secrets from a server that has one.
+pub const SIGNING_KEY_FILE: &str = "signing-key.asc";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -48,9 +51,9 @@ pub struct DumpManifest {
     pub aurcache_version: String,
     /// Unix seconds.
     pub created_at: i64,
-    /// Whether the archive carries the CA, worker certificates and token
-    /// hashes. A dump with this set is dangerous to share -- the CA private
-    /// key mints worker identities the server accepts.
+    /// Whether the archive carries the CA, worker certificates, token hashes
+    /// and the signing key. A dump with this set is dangerous to share -- the
+    /// CA private key mints worker identities the server accepts.
     pub includes_secrets: bool,
 }
 
@@ -147,15 +150,26 @@ pub type DumpPackages = BTreeMap<String, DumpPackage>;
 /// certificates, as one unit: a signed certificate is only meaningful under the
 /// CA that signed it.
 ///
-/// The repository's signing key never does. Every client that trusts it
-/// installs as root whatever it signs, from anywhere, for as long as it is
-/// trusted -- long after the instance a dump was taken from is gone. It moves
-/// only as the file it is, copied on purpose.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Its `Debug` shows no key material.
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct DumpSecrets {
     pub ca_cert_pem: String,
     pub ca_key_pem: String,
     pub tokens: Vec<DumpToken>,
+    /// The repository's signing key file, byte for byte as the server stores
+    /// it: locked if it is locked, and never with its passphrase. Every client
+    /// that trusts it installs as root whatever it signs. `None` in a dump
+    /// from a server without one, or written before dumps carried it.
+    pub signing_key: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for DumpSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DumpSecrets")
+            .field("tokens", &self.tokens.len())
+            .field("signing_key", &self.signing_key.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// What to do about secrets a dump carries.
@@ -168,7 +182,7 @@ pub struct DumpSecrets {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SecretsPolicy {
-    /// Leave this instance's CA and tokens as they are.
+    /// Leave this instance's CA, tokens and signing key as they are.
     #[default]
     Ignore,
     /// Take the dump's, replacing what is here.
@@ -269,8 +283,8 @@ pub struct RestoreOptions {
     /// existing package by the time the dump is written.
     #[serde(default)]
     pub clear: bool,
-    /// What to do about the CA, worker certificates and token hashes, when the
-    /// dump carries any. Ignored when it does not.
+    /// What to do about the CA, worker certificates, token hashes and signing
+    /// key, when the dump carries any. Ignored when it does not.
     #[serde(default)]
     pub secrets: SecretsPolicy,
 }

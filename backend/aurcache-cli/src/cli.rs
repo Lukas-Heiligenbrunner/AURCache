@@ -102,9 +102,11 @@ pub(crate) enum ApiCommand {
         /// directory.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Also export the CA private key, worker certificates and API token
-        /// hashes. The file becomes a credential: anyone holding it can mint a
-        /// worker this server accepts. Written owner-readable only.
+        /// Also export the CA private key, worker certificates, API token
+        /// hashes and the repository signing key, locked if it is. The file
+        /// becomes a credential: anyone holding it can mint a worker this
+        /// server accepts, and sign packages its clients install. Written
+        /// owner-readable only.
         #[arg(long)]
         include_secrets: bool,
     },
@@ -860,7 +862,7 @@ pub(crate) struct RawArgs {
 /// What an import should do about the dump's secrets.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
 pub(crate) enum Secrets {
-    /// Leave this server's CA and tokens alone.
+    /// Leave this server's CA, tokens and signing key alone.
     Ignore,
     /// Take the dump's, replacing what is here.
     Copy,

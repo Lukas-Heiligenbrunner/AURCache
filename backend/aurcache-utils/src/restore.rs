@@ -30,7 +30,7 @@ use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
     DumpSecrets, DumpSettings, DumpToken, DumpWorker, ExistingPackagePolicy, MANIFEST_FILE,
     PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome, SETTINGS_FILE,
-    SecretsPolicy, TOKENS_FILE, WORKERS_FILE,
+    SIGNING_KEY_FILE, SecretsPolicy, TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
@@ -67,13 +67,21 @@ pub struct LoadedDump {
 /// dump describes, which is worse than either.
 pub fn load_dump(bytes: &[u8]) -> anyhow::Result<LoadedDump> {
     let mut files = BTreeMap::new();
+    let mut signing_key = None;
     let mut archive = tar::Archive::new(GzDecoder::new(bytes));
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_string_lossy().into_owned();
+        // The signing key is kept as stored, which may be binary.
+        if path == SIGNING_KEY_FILE {
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content)?;
+            signing_key = Some(content);
+            continue;
+        }
         let mut content = String::new();
-        // A dump holds JSON and patches; anything that is not text is not
-        // something this format has ever contained.
+        // Everything else is JSON and patches; anything that is not text is
+        // not something this format has ever contained.
         entry
             .read_to_string(&mut content)
             .map_err(|e| anyhow::anyhow!("{path} is not readable as text: {e}"))?;
@@ -135,7 +143,7 @@ pub fn load_dump(bytes: &[u8]) -> anyhow::Result<LoadedDump> {
             .map_err(|e| anyhow::anyhow!("'{pkgbase}': {e}"))?;
     }
 
-    let secrets = load_secrets(&files, &workers)?;
+    let secrets = load_secrets(&files, &workers, signing_key)?;
     // The flag exists so a reader can tell what it is holding before unpacking
     // it. One that disagrees with the contents is a dump that has been edited,
     // and the safe reading of "the manifest says no secrets" is not one worth
@@ -170,6 +178,7 @@ pub fn load_dump(bytes: &[u8]) -> anyhow::Result<LoadedDump> {
 fn load_secrets(
     files: &BTreeMap<String, String>,
     workers: &[DumpWorker],
+    signing_key: Option<Vec<u8>>,
 ) -> anyhow::Result<Option<DumpSecrets>> {
     let cert = files.get(CA_CERT_FILE);
     let key = files.get(CA_KEY_FILE);
@@ -185,6 +194,11 @@ fn load_secrets(
             }
             if files.contains_key(TOKENS_FILE) {
                 anyhow::bail!("this dump carries {TOKENS_FILE} but no CA; secrets travel together");
+            }
+            if signing_key.is_some() {
+                anyhow::bail!(
+                    "this dump carries {SIGNING_KEY_FILE} but no CA; secrets travel together"
+                );
             }
             return Ok(None);
         }
@@ -202,6 +216,7 @@ fn load_secrets(
         ca_cert_pem,
         ca_key_pem,
         tokens,
+        signing_key,
     }))
 }
 
@@ -1096,6 +1111,14 @@ mod tests {
         );
         let error = load(files).unwrap_err().to_string();
         assert!(error.contains("no CA"), "unhelpful: {error}");
+    }
+
+    #[test]
+    fn a_signing_key_without_a_ca_is_refused() {
+        let mut files = good();
+        files.insert("signing-key.asc", "KEY".to_string());
+        let error = load(files).unwrap_err().to_string();
+        assert!(error.contains("signing-key.asc but no CA"), "{error}");
     }
 
     /// Half a CA is not a CA.

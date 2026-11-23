@@ -83,9 +83,10 @@ fn DumpDialog(open: Signal<bool>) -> Element {
                     div {
                         div { class: "text-sm", "Include secrets" }
                         div { class: "text-xs opacity-60",
-                            "The CA private key, the certificates your workers hold, and \
-                             API token hashes. Restoring these makes a move invisible to \
-                             your workers: they reconnect instead of re-enrolling."
+                            "The CA private key, the certificates your workers hold, API \
+                             token hashes and the repository signing key. Restoring these \
+                             makes a move invisible to your workers: they reconnect instead \
+                             of re-enrolling."
                         }
                     }
                 }
@@ -98,8 +99,9 @@ fn DumpDialog(open: Signal<bool>) -> Element {
                             div { class: "font-semibold", "This file is a credential." }
                             div { class: "text-xs",
                                 "Anyone holding it can act as a build worker for this \
-                                 server, for as long as this CA lives. Keep it as you \
-                                 would keep a private key."
+                                 server, for as long as this CA lives, and sign packages \
+                                 its clients install. Keep it as you would keep a \
+                                 private key."
                             }
                         }
                     }
