@@ -56,6 +56,7 @@ pub fn describe_package(pkgfile: &Path) -> anyhow::Result<PackageEntry> {
         let path = entry.path()?;
         let name = path.display().to_string();
         if !name.starts_with('.') {
+            check_listed(&name)?;
             files.push(name);
         }
 
@@ -97,6 +98,18 @@ pub fn describe_package(pkgfile: &Path) -> anyhow::Result<PackageEntry> {
         desc: desc.to_string(),
         files: format!("%FILES%\n{}", files.join("\n")),
     })
+}
+
+/// Refuse a path that would end the `repo.files` list: pacman reads a blank
+/// line as its end, and what follows as another section.
+fn check_listed(path: &str) -> anyhow::Result<()> {
+    if path.is_empty() {
+        bail!("it has a member with no path");
+    }
+    if path.contains('\n') {
+        bail!("it has a member whose path holds a line break");
+    }
+    Ok(())
 }
 
 /// A file's digests, lowercase hex, named after the `desc` fields they fill.
@@ -157,6 +170,44 @@ mod tests {
         fs::write(&path, zstd::stream::encode_all(&bytes[..], 0).unwrap()).unwrap();
 
         assert!(describe_package(&path).is_err());
+    }
+
+    /// A path is a line of `repo.files`, where a blank line ends a section
+    /// and the next line starts another.
+    #[test]
+    fn a_path_that_would_break_the_file_list_is_refused() {
+        for (name, refusal) in [
+            (&b"\0"[..], "no path"),
+            (b"usr/a\n\n%BACKUP%\nusr/b", "line break"),
+        ] {
+            let mut bytes = Vec::new();
+            {
+                let mut builder = tar::Builder::new(&mut bytes);
+                let mut add = |kind: tar::EntryType, path: &str, data: &[u8]| {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_entry_type(kind);
+                    header.set_path(path).unwrap();
+                    header.set_size(data.len() as u64);
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    builder.append(&header, data).unwrap();
+                };
+                add(
+                    tar::EntryType::Regular,
+                    ".PKGINFO",
+                    b"pkgname = demo\npkgver = 1.0-1\n",
+                );
+                add(tar::EntryType::GNULongName, "././@LongLink", name);
+                add(tar::EntryType::Regular, "usr/x", b"");
+                builder.finish().unwrap();
+            }
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("demo-1.0-1-x86_64.pkg.tar.zst");
+            fs::write(&path, zstd::stream::encode_all(&bytes[..], 0).unwrap()).unwrap();
+
+            let error = describe_package(&path).unwrap_err().to_string();
+            assert!(error.contains(refusal), "{error}");
+        }
     }
 
     /// A detached signature beside a package goes into its entry as
