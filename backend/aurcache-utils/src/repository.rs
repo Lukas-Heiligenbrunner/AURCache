@@ -1324,7 +1324,7 @@ fn sort_signatures(
 }
 
 /// What is in the file at `path`, or `None` when there is none.
-fn read_if_there(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+pub(crate) fn read_if_there(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),

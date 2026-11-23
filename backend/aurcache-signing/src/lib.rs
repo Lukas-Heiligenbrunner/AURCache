@@ -107,19 +107,14 @@ pub fn from_env(ca_dir: &Path) -> anyhow::Result<Option<InstanceKey>> {
         }
         return Ok(None);
     }
-    let passphrase = server_env::AURCACHE_SIGNING_KEY_PASSPHRASE_FILE
-        .get_os()
-        .map(|path| read_passphrase(Path::new(&path)))
-        .transpose()?;
-    let supplied = server_env::AURCACHE_SIGNING_KEY_FILE
-        .get_os()
-        .map(PathBuf::from);
-    let path = supplied.clone().unwrap_or_else(|| ca_dir.join(KEY_FILE));
-    let key = match supplied {
-        Some(_) => InstanceKey::load(&path, passphrase.as_deref()),
-        None => InstanceKey::load_or_create(&path, passphrase.as_deref()),
+    let config = KeyConfig::from_env(ca_dir);
+    let passphrase = config.passphrase()?;
+    let key = match &config.key {
+        KeyFile::Supplied(path) => InstanceKey::load(path, passphrase.as_deref()),
+        KeyFile::Own(path) => InstanceKey::load_or_create(path, passphrase.as_deref()),
     }?;
-    if is_inside(&path, Path::new(REPO_ROOT)) {
+    let path = config.key.path();
+    if is_inside(path, Path::new(REPO_ROOT)) {
         tracing::warn!(
             "The repository signing key {} is inside the repository directory {REPO_ROOT}: \
              whatever else serves, mirrors or syncs that directory hands it out with the \
@@ -131,6 +126,59 @@ pub fn from_env(ca_dir: &Path) -> anyhow::Result<Option<InstanceKey>> {
         );
     }
     Ok(Some(key))
+}
+
+/// Where the instance key is kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyFile {
+    /// The server's own: [`KEY_FILE`] in its CA directory, created there the
+    /// first time.
+    Own(PathBuf),
+    /// One supplied with `AURCACHE_SIGNING_KEY_FILE`, which the server reads
+    /// and never writes.
+    Supplied(PathBuf),
+}
+
+impl KeyFile {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Own(path) | Self::Supplied(path) => path,
+        }
+    }
+}
+
+/// Where the environment keeps the instance key and its passphrase, whether
+/// or not the server signs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyConfig {
+    pub key: KeyFile,
+    /// `AURCACHE_SIGNING_KEY_PASSPHRASE_FILE`, when it is set.
+    pub passphrase_file: Option<PathBuf>,
+}
+
+impl KeyConfig {
+    /// The configuration of a server whose CA directory is `ca_dir`.
+    #[must_use]
+    pub fn from_env(ca_dir: &Path) -> Self {
+        Self {
+            key: match server_env::AURCACHE_SIGNING_KEY_FILE.get_os() {
+                Some(path) => KeyFile::Supplied(PathBuf::from(path)),
+                None => KeyFile::Own(ca_dir.join(KEY_FILE)),
+            },
+            passphrase_file: server_env::AURCACHE_SIGNING_KEY_PASSPHRASE_FILE
+                .get_os()
+                .map(PathBuf::from),
+        }
+    }
+
+    /// The passphrase in [`Self::passphrase_file`], when there is one.
+    pub fn passphrase(&self) -> anyhow::Result<Option<String>> {
+        self.passphrase_file
+            .as_deref()
+            .map(read_passphrase)
+            .transpose()
+    }
 }
 
 /// Whether `path` is inside `dir`, both followed through symlinks where

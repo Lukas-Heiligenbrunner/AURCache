@@ -126,8 +126,9 @@ pub(crate) async fn dump_command(
         println!("wrote {} ({} bytes)", written.path.display(), written.bytes);
         if include_secrets {
             println!(
-                "This file contains the CA private key. Anyone holding it can \
-                 act as a build worker for this server."
+                "This file contains the CA private key and the repository signing \
+                 key. Anyone holding it can act as a build worker for this server, \
+                 and sign packages its clients install."
             );
         }
     })

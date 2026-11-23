@@ -325,6 +325,20 @@ fn archive_files(bytes: &[u8]) -> HashMap<String, String> {
         .collect()
 }
 
+/// Read a `.tar.gz` into path -> mode.
+fn archive_modes(bytes: &[u8]) -> HashMap<String, u32> {
+    let mut archive = tar::Archive::new(GzDecoder::new(bytes));
+    archive
+        .entries()
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            (path, entry.header().mode().unwrap())
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Restore
 // ---------------------------------------------------------------------------
@@ -961,7 +975,12 @@ async fn a_default_dump_carries_no_secrets() {
     assert!(!dump.manifest.includes_secrets);
 
     let files = archive_files(&write_archive(&dump).unwrap());
-    for forbidden in ["ca-cert.pem", "ca-key.pem", "tokens.json"] {
+    for forbidden in [
+        "ca-cert.pem",
+        "ca-key.pem",
+        "tokens.json",
+        "signing-key.asc",
+    ] {
         assert!(
             !files.contains_key(forbidden),
             "a public dump carries {forbidden}"
@@ -1009,12 +1028,10 @@ async fn a_private_dump_carries_the_ca_and_says_so() {
 
     let ca_dir = tempfile::tempdir().unwrap();
     let ca = aurcache_ca::Ca::load_or_create(ca_dir.path()).unwrap();
-    // The repository's signing key lives beside the CA, and stays there.
-    aurcache_signing::InstanceKey::load_or_create(
-        &ca_dir.path().join(aurcache_signing::KEY_FILE),
-        None,
-    )
-    .unwrap();
+    // Locked, and carried as stored: locked, without its passphrase.
+    let key_path = ca_dir.path().join(aurcache_signing::KEY_FILE);
+    aurcache_signing::InstanceKey::load_or_create(&key_path, Some("correct horse")).unwrap();
+    let key = std::fs::read(&key_path).unwrap();
 
     let dump = build_dump(&source, "test", Some(ca_dir.path()))
         .await
@@ -1025,22 +1042,40 @@ async fn a_private_dump_carries_the_ca_and_says_so() {
     assert_eq!(secrets.tokens.len(), 1);
     // The certificate travels only in this mode.
     assert!(dump.workers[0].signed_cert.is_some());
+    // Nothing secret in what a log would show of it.
+    let shown = format!("{secrets:?}");
+    assert!(
+        !shown.contains("PRIVATE KEY") && !shown.contains("secret-hash"),
+        "{shown}"
+    );
 
-    let files = archive_files(&write_archive(&dump).unwrap());
+    let archive = write_archive(&dump).unwrap();
+    let files = archive_files(&archive);
     assert_eq!(
         files.get("ca-key.pem").map(String::as_str),
         Some(ca.private_key_pem())
     );
+    assert_eq!(files["signing-key.asc"].as_bytes(), key);
     assert!(
         !files
             .values()
-            .any(|content| content.contains("PGP PRIVATE KEY")),
-        "a dump never carries the repository's signing key"
+            .any(|content| content.contains("correct horse"))
     );
+    let modes = archive_modes(&archive);
+    for secret in [
+        "ca-cert.pem",
+        "ca-key.pem",
+        "tokens.json",
+        "signing-key.asc",
+    ] {
+        assert_eq!(modes[secret], 0o600, "{secret}");
+    }
+    assert_eq!(modes[MANIFEST_FILE], 0o644);
 
     // And it round-trips through the reader, which is what a restore does.
-    let loaded = load_dump(&write_archive(&dump).unwrap()).unwrap();
-    assert_eq!(loaded.secrets.unwrap().ca_key_pem, ca.private_key_pem());
+    let loaded = load_dump(&archive).unwrap().secrets.unwrap();
+    assert_eq!(loaded.ca_key_pem, ca.private_key_pem());
+    assert_eq!(loaded.signing_key, Some(key));
 }
 
 /// Ignoring secrets is the default on the way back in, too. Replacing a CA

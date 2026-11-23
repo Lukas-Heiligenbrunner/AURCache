@@ -10,7 +10,7 @@ use std::io::Write;
 use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
     DumpSecrets, DumpSettings, DumpToken, DumpWorker, MANIFEST_FILE, PACKAGES_FILE, PATCH_DIR,
-    SETTINGS_FILE, TOKENS_FILE, WORKERS_FILE,
+    SETTINGS_FILE, SIGNING_KEY_FILE, TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_db::api_tokens;
@@ -39,8 +39,9 @@ pub struct Dump {
 /// Read the authored state out of the database.
 ///
 /// `ca_dir` opts the dump into carrying secrets: the CA, the certificates the
-/// workers hold, and the API token hashes. `None` -- the default everywhere --
-/// produces a dump that is safe to keep beside ordinary backups.
+/// workers hold, the API token hashes and the signing key. `None` -- the
+/// default everywhere -- produces a dump that is safe to keep beside ordinary
+/// backups.
 pub async fn build_dump(
     db: &DatabaseConnection,
     aurcache_version: &str,
@@ -101,17 +102,24 @@ pub async fn build_dump(
     })
 }
 
-/// Read the CA and the token hashes.
+/// Read the CA, the token hashes and the signing key.
 ///
-/// The CA is read from its files rather than from a loaded `Ca`, deliberately:
-/// there is no method anywhere that hands out the private key of a CA already
-/// in memory, and this does not add one. Export moves files; so does restore.
+/// The CA and the signing key are read from their files rather than from a
+/// loaded `Ca` or key, deliberately: there is no method anywhere that hands out
+/// a private key already in memory, and this does not add one. Export moves
+/// files; so does restore.
 async fn build_secrets(
     db: &DatabaseConnection,
     ca_dir: &std::path::Path,
 ) -> anyhow::Result<DumpSecrets> {
+    let key_path = aurcache_signing::KeyConfig::from_env(ca_dir)
+        .key
+        .path()
+        .to_path_buf();
     let ca_dir = ca_dir.to_path_buf();
     let ca = tokio::task::spawn_blocking(move || aurcache_ca::Ca::load(&ca_dir)).await??;
+    let signing_key =
+        tokio::task::spawn_blocking(move || crate::repository::read_if_there(&key_path)).await??;
     let ca_cert_pem = ca.ca_cert_pem().to_owned();
     let ca_key_pem = ca.private_key_pem().to_owned();
 
@@ -130,6 +138,7 @@ async fn build_secrets(
         ca_cert_pem,
         ca_key_pem,
         tokens,
+        signing_key,
     })
 }
 
@@ -217,17 +226,25 @@ pub fn write_archive(dump: &Dump) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     {
         let mut tar = tar::Builder::new(GzEncoder::new(&mut bytes, Compression::default()));
-        append(&mut tar, MANIFEST_FILE, &to_json(&dump.manifest)?)?;
-        append(&mut tar, PACKAGES_FILE, &to_json(&dump.packages)?)?;
-        append(&mut tar, SETTINGS_FILE, &to_json(&dump.settings)?)?;
-        append(&mut tar, WORKERS_FILE, &to_json(&dump.workers)?)?;
+        append(&mut tar, MANIFEST_FILE, &to_json(&dump.manifest)?, PUBLIC)?;
+        append(&mut tar, PACKAGES_FILE, &to_json(&dump.packages)?, PUBLIC)?;
+        append(&mut tar, SETTINGS_FILE, &to_json(&dump.settings)?, PUBLIC)?;
+        append(&mut tar, WORKERS_FILE, &to_json(&dump.workers)?, PUBLIC)?;
         for (pkgbase, patch) in &dump.patches {
-            append(&mut tar, &format!("{PATCH_DIR}/{pkgbase}.patch"), patch)?;
+            append(
+                &mut tar,
+                &format!("{PATCH_DIR}/{pkgbase}.patch"),
+                patch,
+                PUBLIC,
+            )?;
         }
         if let Some(secrets) = &dump.secrets {
-            append(&mut tar, CA_CERT_FILE, &secrets.ca_cert_pem)?;
-            append(&mut tar, CA_KEY_FILE, &secrets.ca_key_pem)?;
-            append(&mut tar, TOKENS_FILE, &to_json(&secrets.tokens)?)?;
+            append(&mut tar, CA_CERT_FILE, &secrets.ca_cert_pem, PRIVATE)?;
+            append(&mut tar, CA_KEY_FILE, &secrets.ca_key_pem, PRIVATE)?;
+            append(&mut tar, TOKENS_FILE, &to_json(&secrets.tokens)?, PRIVATE)?;
+            if let Some(key) = &secrets.signing_key {
+                append(&mut tar, SIGNING_KEY_FILE, key, PRIVATE)?;
+            }
         }
         // Finish explicitly: dropping the encoder would swallow a compression
         // error.
@@ -242,12 +259,23 @@ fn to_json<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(value)?))
 }
 
-fn append<W: Write>(tar: &mut tar::Builder<W>, path: &str, content: &str) -> anyhow::Result<()> {
+/// The mode of a file anyone may read once unpacked.
+const PUBLIC: u32 = 0o644;
+/// The mode of a secret: unpacked, it is its owner's alone.
+const PRIVATE: u32 = 0o600;
+
+fn append<W: Write>(
+    tar: &mut tar::Builder<W>,
+    path: &str,
+    content: impl AsRef<[u8]>,
+    mode: u32,
+) -> anyhow::Result<()> {
+    let content = content.as_ref();
     let mut header = tar::Header::new_gnu();
     header.set_path(path)?;
     header.set_size(content.len() as u64);
-    header.set_mode(0o644);
+    header.set_mode(mode);
     header.set_cksum();
-    tar.append(&header, content.as_bytes())?;
+    tar.append(&header, content)?;
     Ok(())
 }
