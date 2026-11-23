@@ -40,6 +40,7 @@ pub use aurcache_common::api::package::{
 pub use aurcache_common::api::package::{SourceFileContent, SourceFileList, SourceFileUpdate};
 pub use aurcache_common::api::repo::{RepoInfo, SigningInfo};
 pub use aurcache_common::api::settings::{SchedulePreview, SettingResponse, SettingValue};
+pub use aurcache_common::api::ssh::SshKey;
 pub use aurcache_common::api::stats::{
     ApiTokenResponse, DashboardView, GraphDataPoint, ListStats, LongBuild, OutOfDateSlice,
     QueueSlice, UserInfo,
@@ -51,7 +52,9 @@ pub use aurcache_common::api::worker::{
 pub use aurcache_common::settings::{
     ApplicationSettings, Setting, SettingSource, SettingsEntry, SettingsMeta,
 };
-pub use aurcache_common::source::{GitSourceSpec, SourceData, looks_like_git_url, source_label};
+pub use aurcache_common::source::{
+    GitSourceSpec, SourceData, SshRemote, looks_like_git_url, source_label, ssh_remote,
+};
 use reqwest::Response;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -185,6 +188,11 @@ impl AurCacheClient {
     /// is not. Needs no token, so a client can learn it before it has one.
     pub async fn repo_signing(&self) -> Result<Option<SigningInfo>> {
         self.get("/repo/signing").await
+    }
+
+    /// The server's SSH key for cloning package sources.
+    pub async fn ssh_key(&self) -> Result<SshKey> {
+        self.get("/ssh").await
     }
 
     /// Calls the health endpoint and returns success when the instance is healthy.
