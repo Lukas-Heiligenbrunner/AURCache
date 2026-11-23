@@ -228,12 +228,12 @@ cgroup the runner is started in, so the container stays inside it, and
 Stop and `memory.peak` cover it. That retires both the patch and
 `docker/nspawn-wrapper.sh`.
 
-nspawn is started with the sandbox's `NO_VSOCK` seccomp filter already
+nspawn is started with the sandbox's vsock seccomp filter already
 installed, as `aurcache-sandbox container` does for the patched script: no
 `AF_VSOCK` socket through any ABI the kernel runs, and no io_uring.
 
-This is the one place that says why nspawn's own
-`--restrict-address-families=~AF_VSOCK` is no substitute. nspawn accepts it
+nspawn's own `--restrict-address-families=~AF_VSOCK` is no substitute
+(the code and user docs point here for why). nspawn accepts it
 (from systemd 261) and refuses the native `socket(AF_VSOCK)`, but systemd's
 `seccomp_restrict_address_families` skips every architecture that has
 `socketcall`, x86 among them, and nspawn's allowlist includes `@aio`. So,

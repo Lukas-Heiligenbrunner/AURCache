@@ -47,10 +47,8 @@
 # Of the worker-like binds the build is given, the containers before it must
 # get only the job's package cache; stock makechrootpkg's upgrade gets them all.
 #
-# And vsock, which no network namespace confines: a listener on the loopback
-# CID, where the kernel has one, which the PKGBUILD on the host, the
-# scriptlet, root at the build's start and the build itself try to reach --
-# and the server's parse profile, which runs a PKGBUILD too.
+# And vsock, which no network namespace confines: everywhere a PKGBUILD's
+# code runs, and in the server's parse, tries a listener on the loopback CID.
 #
 # Last, with the protected-path list unreadable to the build user, the
 # sandbox must refuse the build outright rather than read it as no list.
@@ -222,9 +220,7 @@ try mknod mknod /dev/aurcache-netprobe c 1 3
 aurcache-netprobe-vsock > vsock
 if out=$(keyctl add user aurcache-netprobe 1 @s 2>&1); then echo allowed; else echo "${out##*: }"; fi > keyring
 ESCAPES
-# reached, unreachable (a socket, but no listener), refused (no socket:
-# EAFNOSUPPORT, as the filters answer) or failed(N) for anything else; the
-# codes are not perl's own (2, 255).
+# refused is only the filters' EAFNOSUPPORT, on exit codes perl never uses.
 cat > vsock <<'VSOCK'
 #!/bin/bash
 perl -MSocket -e 'socket(my $s, 40, SOCK_STREAM, 0) or exit($!{EAFNOSUPPORT} ? 10 : 11);
@@ -428,11 +424,8 @@ if sudo -u builder unshare -rm mount -t tmpfs aurcache-host /mnt >/dev/null 2>&1
 then echo host_userns_mount=allowed; else echo host_userns_mount=refused; fi
 echo "vsock_kernel=$(cat /tmp/vsock-kernel 2>/dev/null || echo missing)"
 echo "heard_vsock=$(sort -u /tmp/heard-vsock | paste -sd, -)"
-# The server's parse sources a PKGBUILD as well: as `aurcache-parse` when the
-# sandbox is started as root (the server images), and as the caller under
-# Landlock alone otherwise (a native server). The same PKGBUILD sourced
-# without it is the control. After the listener's count is taken: the
-# control reaches it.
+# The parse, as root (the server images) and unprivileged (a native
+# server), beside an unsandboxed control; after the listener's count.
 id aurcache-parse >/dev/null 2>&1 || useradd -r -M -s /usr/bin/nologin aurcache-parse
 mkdir -p /srv/parse && cp /job/netprobe/vsock /srv/parse/PKGBUILD
 source_it=(bash -c 'source "$1"' parse)
@@ -649,11 +642,8 @@ check "unreadable: build refused"           failed  "$(get unreadable_build "$co
 check "unreadable: by the sandbox"          refused "$(get unreadable_refusal "$confined")"
 check "unreadable: ssh key unreadable"      blocked "$(get unreadable_ssh "$confined")"
 
-# vsock: the open leg shows what this kernel lets a socket do, and the
-# confined leg refuses the socket itself, everywhere a PKGBUILD's code runs.
-# The host-side runs and the build are held by the sandbox's filters; root
-# in the build's container too, by the one every container is started under;
-# the install by the offline profile's own.
+# vsock: the open leg shows what this kernel allows; the confined leg must
+# refuse the socket itself.
 case $(get vsock_kernel "$unconfined") in
     loopback) open=reached ;;
     no-loopback) open=unreachable ;;
@@ -672,7 +662,6 @@ if [[ -n $open ]]; then
     # Not a listener that died: the unsandboxed parse below reaches it after
     # this count is taken.
     check "confined:   vsock listener hears nothing" ""     "$(get heard_vsock "$confined")"
-    # The parse profile, as both kinds of server run it, beside the control.
     check "unsandboxed parse opens vsock"          "$open"  "$(get parse_bare_vsock "$confined")"
     check "parse as root: no vsock"                refused  "$(get parse_root_vsock "$confined")"
     check "parse unprivileged: no vsock"           refused  "$(get parse_user_vsock "$confined")"

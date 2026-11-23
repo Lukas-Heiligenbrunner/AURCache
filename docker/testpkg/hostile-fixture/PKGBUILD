@@ -59,12 +59,8 @@ $([ -d /var/lib/aurcache-worker ] &&
     SSH_AUTH_SOCK=/var/lib/aurcache-worker/agent/other/agent.sock ssh-add -l >/dev/null 2>&1 &&
     echo reached >> ./other-agent-reached)
 
-# A vsock socket, which no network namespace confines: connected to the test's
-# listener on the loopback CID where the kernel has one. Recorded as reached,
-# unreachable (a socket, but no listener to reach), refused (no socket:
-# EAFNOSUPPORT, as the filters answer) or failed(N) for anything else; the
-# codes are not perl's own (2, 255).
-# Host-only, as above.
+# vsock to the test's loopback listener, as test-sandbox.sh's probe records
+# it. Host-only, as above.
 $([ -d /var/lib/aurcache-worker ] && {
     perl -MSocket -e 'socket(my $s, 40, SOCK_STREAM, 0) or exit($!{EAFNOSUPPORT} ? 10 : 11);
         connect($s, pack("SSLLCx3", 40, 0, 7778, 1, 0)) or exit 12'

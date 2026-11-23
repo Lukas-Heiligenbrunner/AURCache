@@ -475,17 +475,11 @@ EOF
         # the container's own `--drop-capability=`: one started without
         # CAP_SYS_ADMIN is left the mount calls, and every other refuses them.
         #
-        # Every container is started under `aurcache-sandbox container`, which
-        # installs a seccomp filter here, on the host, that systemd-nspawn and
-        # everything in the container inherit: no AF_VSOCK socket, through any
-        # ABI the kernel runs, and no io_uring, which would create one without
-        # `socket(2)`. vsock is no network namespace's and no firewall sees it,
-        # so on a worker in a virtual machine it would reach the hypervisor's
-        # vsock services and the machine's own vsock listeners, past the
-        # build's network policy. Why not nspawn's own
+        # Every container is started under `aurcache-sandbox container`, whose
+        # seccomp filter, installed on the host, nspawn and the container
+        # inherit: no AF_VSOCK socket and no io_uring. Why not nspawn's own
         # `--restrict-address-families=~AF_VSOCK`: see "The container" in
-        # design/proposed/build-runner.md. An emulated worker, whose qemu installs no filter, starts the
-        # container anyway, with a warning in the build's log.
+        # design/proposed/build-runner.md.
         #
         # `--restrict-address-families=`: systemd-nspawn currently permits
         # every socket address family and warns, in every build log, that a

@@ -46,11 +46,9 @@
 //!   agent is told so by `SSH_AUTH_SOCK`, and may connect to that one socket
 //!   as well. Older kernels cannot say, and leave sockets unrestricted.
 //!
-//! - **Socket families**: every family but `AF_VSOCK`, and no io_uring (the
-//!   `NO_VSOCK` filter of `seccomp.rs`). A download needs the network, which
-//!   is the build's network policy to limit; vsock is outside it, since no
-//!   network namespace confines it and no firewall sees it. An emulated
-//!   process cannot install the filter, and runs after a warning instead.
+//! - **Socket families**: every family but `AF_VSOCK`, and no io_uring
+//!   (`seccomp::Policy::NoVsock`, which says why). An emulated process
+//!   cannot install the filter, and runs after a warning instead.
 //!
 //! `--capabilities --agent-dir DIR` builds nothing: it says whether that
 //! socket rule would hold for the sockets beneath `DIR`, for a build started

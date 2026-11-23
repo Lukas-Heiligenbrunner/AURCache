@@ -1,50 +1,19 @@
-//! The sandbox's seccomp filters, one per [`Policy`]:
+//! The sandbox's seccomp filters, one per [`Policy`], in classic BPF written
+//! out by hand: they are a few dozen instructions, and the crates that would
+//! generate them do not all know the 32-bit ARM the worker also runs on.
 //!
-//! - [`OFFLINE`], for the `offline` profile: no socket but a UNIX one, and no
-//!   kernel keyring;
-//! - [`NO_VSOCK`], for the build, `container` and `parse` profiles: every
-//!   socket but an `AF_VSOCK` one.
+//! - `socket(2)` and `socketpair(2)` fail with `EAFNOSUPPORT` for a refused
+//!   family. Both policies refuse `AF_VSOCK`: no network namespace confines
+//!   it and no firewall sees it, so in a virtual machine it reaches the
+//!   hypervisor's vsock services and the machine's own listeners;
+//! - `io_uring_setup(2)` fails with `ENOSYS`, as a ring creates sockets
+//!   without `socket`;
+//! - a call through an ABI the policy does not filter kills the process, and
+//!   the x32 range fails with `ENOSYS`.
 //!
-//! Classic BPF, written out by hand: the filters are a few dozen
-//! instructions, and the crates that would generate them do not all know the
-//! 32-bit ARM the worker also runs on.
-//!
-//! - `socket(2)` and `socketpair(2)` fail with `EAFNOSUPPORT` for a family
-//!   the policy refuses. Under [`OFFLINE`] that is every family but
-//!   `AF_UNIX`: IPv4 and IPv6 (TCP, UDP, SCTP, raw), packet sockets,
-//!   netlink, vsock, and whatever a kernel adds later. Under [`NO_VSOCK`] it
-//!   is `AF_VSOCK` alone, which no network namespace confines and no
-//!   firewall sees: a process in a virtual machine reaches the hypervisor's
-//!   vsock services through it, and the machine's own vsock listeners;
-//! - `io_uring_setup(2)` fails with `ENOSYS` under both, since a ring can
-//!   create sockets of any family without the `socket` system call, and
-//!   programs that probe for io_uring fall back on it;
-//! - under [`OFFLINE`], `add_key(2)`, `request_key(2)` and `keyctl(2)` fail
-//!   with `ENOSYS`: the kernel keyring is no namespace's, and
-//!   `request_key("dns_resolver", ...)` has the host resolve a name, through
-//!   a helper the kernel starts outside every namespace -- a DNS query no
-//!   network layer of this process sees;
-//! - a system call made through another ABI than this binary's is not
-//!   filtered by this binary's numbers. Under [`OFFLINE`] it is refused: the
-//!   process is killed for a foreign architecture. Under [`NO_VSOCK`], which
-//!   holds whole builds, the 32-bit ABI the kernel also runs (i386 on
-//!   x86-64, 32-bit ARM on aarch64) is filtered by its own numbers, so a
-//!   build's 32-bit glibc programs keep working, and any other ABI is
-//!   killed. On x86-64 the x32 range fails with `ENOSYS` under both. The
-//!   `socketcall` multiplexer passes its arguments behind a pointer the
-//!   filter cannot read, so it may not create a socket at all: glibc, built
-//!   for Linux 4.4 and later as Arch Linux builds it, calls `socket`
-//!   directly, but a 32-bit program that creates its sockets through
-//!   `socketcall` -- a Go `linux/386` binary, some i386 musl and old glibc
-//!   builds -- gets `ENOSYS` for every socket, of any family. nspawn's own
-//!   address-family option leaves this ABI open: see "The container" in
-//!   `design/proposed/build-runner.md`.
-//!
-//! A filter is inherited across `fork` and `execve` and cannot be removed,
-//! so everything the confined program starts is held to it. It is the
-//! kernel's, not the program's: a filter installed natively also holds a
-//! program qemu runs emulated, since it is qemu's own system calls the
-//! kernel sees. An emulated process cannot install one, though: qemu refuses.
+//! A filter is inherited across `fork` and `execve` and cannot be removed.
+//! One installed natively also holds a program qemu emulates; an emulated
+//! process cannot install one.
 
 /// One BPF instruction, as the kernel reads it.
 pub type Instruction = libc::sock_filter;
@@ -79,8 +48,6 @@ pub struct Abi {
     pub socket: u32,
     pub socketpair: u32,
     pub io_uring_setup: u32,
-    /// `add_key`, `request_key` and `keyctl`.
-    pub keyring: [u32; 3],
     /// Numbers at or above this belong to another ABI sharing `audit` (x32).
     pub foreign_from: Option<u32>,
     /// A multiplexer that could create a socket without `socket` itself.
@@ -95,53 +62,18 @@ pub struct Arch {
     pub compat: Option<Abi>,
 }
 
-/// The socket families `socket` and `socketpair` may create.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Families {
-    /// `AF_UNIX` alone.
-    UnixOnly,
-    /// Every family but `AF_VSOCK`.
-    AllButVsock,
-}
-
-/// What becomes of the kernel keyring's calls.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Keyring {
-    Refused,
-    Allowed,
-}
-
-/// What becomes of a call made through [`Arch::compat`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Compat {
-    /// The process is killed.
-    Killed,
-    /// It is held to the same policy, by that ABI's numbers.
-    Filtered,
-}
-
 /// What one filter refuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Policy {
-    pub families: Families,
-    pub keyring: Keyring,
-    pub compat: Compat,
+pub enum Policy {
+    /// A dependency install: no socket but a UNIX one, no kernel keyring
+    /// (whose `dns_resolver` resolves names outside every namespace), and no
+    /// ABI but this binary's.
+    Offline,
+    /// A build, and a PKGBUILD's code outside its chroot: every socket but a
+    /// vsock one. The 32-bit ABI is filtered by its own numbers, so 32-bit
+    /// programs keep working.
+    NoVsock,
 }
-
-/// A dependency install: no network of any kind.
-pub const OFFLINE: Policy = Policy {
-    families: Families::UnixOnly,
-    keyring: Keyring::Refused,
-    compat: Compat::Killed,
-};
-
-/// A build, and the code a PKGBUILD runs outside its chroot: everything but
-/// vsock.
-pub const NO_VSOCK: Policy = Policy {
-    families: Families::AllButVsock,
-    keyring: Keyring::Allowed,
-    compat: Compat::Filtered,
-};
 
 /// A system call number as the filter compares it.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -156,7 +88,6 @@ const I386: Abi = Abi {
     socket: 359,
     socketpair: 360,
     io_uring_setup: 425,
-    keyring: [286, 287, 288],
     foreign_from: None,
     socketcall: Some(102),
 };
@@ -173,7 +104,6 @@ const ARM: Abi = Abi {
     socket: 281,
     socketpair: 288,
     io_uring_setup: 425,
-    keyring: [309, 310, 311],
     foreign_from: None,
     socketcall: Some(102),
 };
@@ -189,11 +119,6 @@ pub fn native() -> Option<Arch> {
             socket: nr(libc::SYS_socket),
             socketpair: nr(libc::SYS_socketpair),
             io_uring_setup: nr(libc::SYS_io_uring_setup),
-            keyring: [
-                nr(libc::SYS_add_key),
-                nr(libc::SYS_request_key),
-                nr(libc::SYS_keyctl),
-            ],
             foreign_from: Some(0x4000_0000),
             socketcall: None,
         },
@@ -206,11 +131,6 @@ pub fn native() -> Option<Arch> {
             socket: nr(libc::SYS_socket),
             socketpair: nr(libc::SYS_socketpair),
             io_uring_setup: nr(libc::SYS_io_uring_setup),
-            keyring: [
-                nr(libc::SYS_add_key),
-                nr(libc::SYS_request_key),
-                nr(libc::SYS_keyctl),
-            ],
             foreign_from: None,
             socketcall: None,
         },
@@ -223,14 +143,7 @@ pub fn native() -> Option<Arch> {
             socket: nr(libc::SYS_socket),
             socketpair: nr(libc::SYS_socketpair),
             io_uring_setup: nr(libc::SYS_io_uring_setup),
-            keyring: [
-                nr(libc::SYS_add_key),
-                nr(libc::SYS_request_key),
-                nr(libc::SYS_keyctl),
-            ],
             foreign_from: None,
-            // Only the old ABI has it; an EABI kernel that still accepts it
-            // must not have it create sockets.
             socketcall: Some(102),
         },
         compat: None,
@@ -273,15 +186,14 @@ fn errno(code: libc::c_int) -> u32 {
 
 /// The filter for `arch` under `policy`.
 ///
-/// One block per ABI it lets through, each entered when `seccomp_data.arch`
-/// names that ABI and ending in a return; a call from any other ABI falls
-/// through them all and kills the process.
+/// Every block ends in a return, so a call from an ABI no block names falls
+/// through to the kill.
 #[must_use]
-pub fn program(arch: &Arch, policy: &Policy) -> Vec<Instruction> {
+pub fn program(arch: &Arch, policy: Policy) -> Vec<Instruction> {
     let mut p = vec![load(OFFSET_ARCH)];
-    let compat = match policy.compat {
-        Compat::Filtered => arch.compat.as_ref(),
-        Compat::Killed => None,
+    let compat = match policy {
+        Policy::NoVsock => arch.compat.as_ref(),
+        Policy::Offline => None,
     };
     for abi in std::iter::once(&arch.native).chain(compat) {
         let block = abi_block(abi, policy);
@@ -293,24 +205,34 @@ pub fn program(arch: &Arch, policy: &Policy) -> Vec<Instruction> {
     p
 }
 
+/// `add_key`, `request_key` and `keyctl` in this binary's own ABI, the only
+/// one [`Policy::Offline`] lets through.
+fn keyring_calls() -> [u32; 3] {
+    [
+        nr(libc::SYS_add_key),
+        nr(libc::SYS_request_key),
+        nr(libc::SYS_keyctl),
+    ]
+}
+
 /// The decisions for one ABI's calls; every path through it returns.
-fn abi_block(abi: &Abi, policy: &Policy) -> Vec<Instruction> {
+fn abi_block(abi: &Abi, policy: Policy) -> Vec<Instruction> {
     let mut p = vec![load(OFFSET_NR)];
     if let Some(from) = abi.foreign_from {
         p.extend([jump(BPF_JMP_JGE_K, from, 0, 1), ret(errno(libc::ENOSYS))]);
     }
-    let keyring = match policy.keyring {
-        Keyring::Refused => &abi.keyring[..],
-        Keyring::Allowed => &[],
+    let keyring = match policy {
+        Policy::Offline => keyring_calls().to_vec(),
+        Policy::NoVsock => Vec::new(),
     };
-    for &nr in std::iter::once(&abi.io_uring_setup).chain(keyring) {
+    for &nr in std::iter::once(&abi.io_uring_setup).chain(&keyring) {
         p.extend([jump(BPF_JMP_JEQ_K, nr, 0, 1), ret(errno(libc::ENOSYS))]);
     }
     if let Some(nr) = abi.socketcall {
-        p.extend(socketcall_rule(nr, policy.families));
+        p.extend(socketcall_rule(nr, policy));
     }
     for nr in [abi.socket, abi.socketpair] {
-        p.extend(socket_rule(nr, policy.families));
+        p.extend(socket_rule(nr, policy));
     }
     p.push(ret(RET_ALLOW));
     p
@@ -320,13 +242,13 @@ fn abi_block(abi: &Abi, policy: &Policy) -> Vec<Instruction> {
 ///
 /// Not this call: skip the four that decide it. The load replaces the number
 /// in the accumulator, so every path after it returns.
-fn socket_rule(nr: u32, families: Families) -> [Instruction; 5] {
+fn socket_rule(nr: u32, policy: Policy) -> [Instruction; 5] {
     let refused = ret(errno(libc::EAFNOSUPPORT));
     let allowed = ret(RET_ALLOW);
     #[allow(clippy::cast_sign_loss)]
-    let (family, on_match, otherwise) = match families {
-        Families::UnixOnly => (libc::AF_UNIX as u32, allowed, refused),
-        Families::AllButVsock => (libc::AF_VSOCK as u32, refused, allowed),
+    let (family, on_match, otherwise) = match policy {
+        Policy::Offline => (libc::AF_UNIX as u32, allowed, refused),
+        Policy::NoVsock => (libc::AF_VSOCK as u32, refused, allowed),
     };
     [
         jump(BPF_JMP_JEQ_K, nr, 0, 4),
@@ -337,15 +259,14 @@ fn socket_rule(nr: u32, families: Families) -> [Instruction; 5] {
     ]
 }
 
-/// `socketcall` (`nr`), whose family is behind a pointer: it creates no
-/// socket. Under [`Families::UnixOnly`] it is refused outright. Otherwise
-/// only creating one is, and what it does with an existing socket is let
-/// through: 32-bit glibc still accepts connections through it.
-fn socketcall_rule(nr: u32, families: Families) -> Vec<Instruction> {
+/// `socketcall` (`nr`), whose family is behind a pointer: refused outright
+/// offline, and otherwise only to create a socket, as 32-bit glibc still
+/// accepts connections through it.
+fn socketcall_rule(nr: u32, policy: Policy) -> Vec<Instruction> {
     let refused = ret(errno(libc::ENOSYS));
-    match families {
-        Families::UnixOnly => vec![jump(BPF_JMP_JEQ_K, nr, 0, 1), refused],
-        Families::AllButVsock => vec![
+    match policy {
+        Policy::Offline => vec![jump(BPF_JMP_JEQ_K, nr, 0, 1), refused],
+        Policy::NoVsock => vec![
             jump(BPF_JMP_JEQ_K, nr, 0, 5),
             load(OFFSET_ARG0_LOW),
             jump(BPF_JMP_JEQ_K, SYS_SOCKET, 2, 0),
@@ -383,7 +304,7 @@ pub fn install(program: &[Instruction]) -> std::io::Result<()> {
 /// Whether `AF_VSOCK` is refused to this process from here on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Vsock {
-    /// [`NO_VSOCK`] is installed.
+    /// [`Policy::NoVsock`] is installed.
     Refused,
     /// No filter could be installed, for the reason given: vsock is open.
     Open(String),
@@ -405,19 +326,16 @@ impl Vsock {
     }
 }
 
-/// Install [`NO_VSOCK`] on this thread, for good.
-///
-/// Root installs it as it is: nothing it runs loses a privilege. Anyone
-/// else needs `no_new_privs` for it, and is given it. A process that cannot
-/// install a filter at all is told so as [`Vsock::Open`]; anything else that
-/// goes wrong is an error.
+/// Install [`Policy::NoVsock`] on this thread, for good, setting
+/// `no_new_privs` only where root's privilege is not there to install it.
+/// [`Vsock::Open`] where no filter can be installed at all.
 pub fn refuse_vsock() -> Result<Vsock, String> {
     let Some(arch) = native() else {
         return Ok(Vsock::Open(
             "no filter is written for this architecture".into(),
         ));
     };
-    let filter = program(&arch, &NO_VSOCK);
+    let filter = program(&arch, Policy::NoVsock);
     let err = match install(&filter) {
         Ok(()) => return Ok(Vsock::Refused),
         Err(e) if e.raw_os_error() == Some(libc::EACCES) => {
@@ -435,9 +353,8 @@ pub fn refuse_vsock() -> Result<Vsock, String> {
         }
         Err(e) => e,
     };
-    // The kernel checks a filter's shape, never the numbers in it, and the
-    // tests install every shape `program` builds: `EINVAL` here is no filter
-    // at all being accepted, not this one being malformed.
+    // Not a malformed filter: the kernel checks only a filter's shape, and
+    // the tests install every shape `program` builds.
     if err.raw_os_error() == Some(libc::EINVAL) {
         return Ok(Vsock::Open(format!(
             "no seccomp filter can be installed here ({err}): qemu's user-mode \
@@ -464,18 +381,18 @@ mod tests {
     }
 
     /// The filter for this architecture under `policy`.
-    fn filter(policy: &Policy) -> Vec<Instruction> {
+    fn filter(policy: Policy) -> Vec<Instruction> {
         program(&native().expect("a filter for the test target"), policy)
     }
 
-    /// Run `probe` in a child under [`OFFLINE`] and return its exit code.
+    /// Run `probe` in a child under [`Policy::Offline`] and return its exit code.
     fn confined(probe: fn() -> libc::c_int) -> libc::c_int {
-        exit_code(in_child(probe, Some(filter(&OFFLINE))))
+        exit_code(in_child(probe, Some(filter(Policy::Offline))))
     }
 
-    /// The same under [`NO_VSOCK`].
+    /// The same under [`Policy::NoVsock`].
     fn without_vsock(probe: fn() -> libc::c_int) -> libc::c_int {
-        exit_code(in_child(probe, Some(filter(&NO_VSOCK))))
+        exit_code(in_child(probe, Some(filter(Policy::NoVsock))))
     }
 
     /// The same with no filter at all: the control.
@@ -488,10 +405,8 @@ mod tests {
         libc::WEXITSTATUS(status)
     }
 
-    /// Run `probe` in a child, under `filter` if one is given, and return
-    /// its wait status; 254 if the filter could not be installed. A fork
-    /// rather than a thread: the filter cannot be removed, and the test
-    /// harness's other threads must not inherit it.
+    /// `probe`'s wait status in a forked child under `filter` (exit 254 if
+    /// it will not install): a filter cannot be removed from a thread.
     fn in_child(probe: fn() -> libc::c_int, filter: Option<Vec<Instruction>>) -> libc::c_int {
         // SAFETY: the child only makes system calls and exits; it never
         // returns into the test harness or touches its locks.
@@ -646,7 +561,7 @@ mod tests {
         let kernel = [217, 218, 219];
         #[cfg(target_arch = "arm")]
         let kernel = [309, 310, 311];
-        assert_eq!(native().expect("a filter").native.keyring, kernel);
+        assert_eq!(keyring_calls(), kernel);
     }
 
     /// `keyctl(KEYCTL_GET_KEYRING_ID, KEY_SPEC_SESSION_KEYRING, 0)`: a read,
@@ -854,10 +769,8 @@ mod tests {
         }
     }
 
-    /// The kernel checks a filter's shape, never the numbers in it. So every
-    /// shape `program` builds, for any architecture, is installed here: an
-    /// ABI with or without an x32 range or `socketcall`, with or without a
-    /// 32-bit one beside it, under each policy.
+    /// The kernel checks a filter's shape, never its numbers, so installing
+    /// every shape `program` builds here covers every architecture's.
     #[test]
     fn every_shape_of_filter_installs() {
         let abi = |foreign_from, socketcall| Abi {
@@ -866,7 +779,7 @@ mod tests {
             ..native().expect("a filter for the test target").native
         };
         let shapes = [(None, None), (Some(0x4000_0000), None), (None, Some(102))];
-        for policy in [&OFFLINE, &NO_VSOCK] {
+        for policy in [Policy::Offline, Policy::NoVsock] {
             for (foreign_from, socketcall) in shapes {
                 for compat in [false, true] {
                     let arch = Arch {
@@ -1040,7 +953,7 @@ mod tests {
             if !kernel_runs_i386() {
                 return;
             }
-            let status = in_child(inet, Some(filter(&OFFLINE)));
+            let status = in_child(inet, Some(filter(Policy::Offline)));
             assert!(
                 libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGSYS,
                 "status {status:#x}"

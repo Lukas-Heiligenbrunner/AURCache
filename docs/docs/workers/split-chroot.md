@@ -203,12 +203,11 @@ something the other covers:
 
 - **The namespace alone**, as on an emulated worker, leaves `AF_VSOCK`, which
   no network namespace confines: on a worker in a virtual machine, a
-  scriptlet can reach the hypervisor's vsock services. Natively the
-  container's own filter refuses it as well ([below](#vsock)); under
-  emulation nothing does. The namespace alone would leave the kernel
-  keyring too, but the container's own filter refuses that (below), and
-  under emulation, where neither filter can be installed, qemu implements
-  none of the keyring calls.
+  scriptlet can reach the hypervisor's vsock services, unless the
+  container's own filter refuses them ([below](#vsock)). It would leave the
+  kernel keyring too, but the container's own filter refuses that (below),
+  and under emulation, where neither filter can be installed, qemu
+  implements none of the keyring calls.
 - **The filter alone**, where root cannot create a namespace, leaves UNIX
   sockets, and on kernels before 6.12, where Landlock does not scope them,
   the abstract UNIX sockets of the worker's network namespace with them.
@@ -239,31 +238,24 @@ root, and follows no link in it.
 
 ### vsock
 
-`AF_VSOCK` sockets are how a virtual machine and its hypervisor talk, and no
-network namespace confines them and no network policy sees them. On a worker
-in a virtual machine, a build could reach the hypervisor's vsock services
-through one, and any vsock listener in the machine itself: systemd 256 and
-later can serve `sshd` on vsock in a guest, for example. So everywhere a
-PKGBUILD's code runs on the worker, a seccomp filter refuses them, and
-io_uring with them, which can create a socket without the `socket` call:
+No network namespace confines `AF_VSOCK` sockets and no network policy sees
+them: on a worker in a virtual machine, a build could reach the hypervisor's
+vsock services through one, and any vsock listener in the machine itself
+(systemd 256 and later can serve `sshd` on vsock in a guest). So a seccomp
+filter refuses them, and io_uring, which can create one without `socket`,
+everywhere a PKGBUILD's code runs on the worker:
 
-- every container of a build, the build's and the install's included: the
-  build script starts each one under `aurcache-sandbox container`, which
-  installs the filter on the worker before `systemd-nspawn` starts, so it
-  holds whatever nspawn's version (nspawn's own address-family option
-  leaves 32-bit programs and io_uring open);
-- the PKGBUILD's runs outside the chroot (the source download, and reading
-  the dependencies), under `aurcache-sandbox --allow-build-env`;
-- the install, under `aurcache-sandbox offline`, whose filter allows no
-  socket but a UNIX one.
+- every container of a build: the build script starts each one under
+  `aurcache-sandbox container`, which installs the filter before
+  `systemd-nspawn` starts, whatever nspawn's version;
+- the PKGBUILD's runs outside the chroot, under `aurcache-sandbox
+  --allow-build-env`;
+- the install, whose filter allows no socket but a UNIX one.
 
-32-bit glibc programs in a build keep working: the filter reads their
-calls by their own numbers. A 32-bit program that creates its sockets
-through `socketcall` instead, such as a Go `linux/386` binary or some i386
-musl and old glibc builds, gets `ENOSYS` for every socket, since the filter
-cannot see the family `socketcall` is asked for. Every other family stays
-open: what a build may connect to over the network is the network policy's
-to say.
+Every other family stays open: that is the network policy's to say. 32-bit
+glibc programs keep working, but a 32-bit program that creates its sockets
+through `socketcall` (a Go `linux/386` binary, some musl and old glibc
+builds) gets `ENOSYS` for every socket.
 
 :::note What a build cannot do
 No setuid program works in the build, so neither do the setuid helpers some
@@ -294,15 +286,10 @@ or writable read-only bind can be made. The other containers, which run no
 code but the official packages', may mount anything. The keyring stays
 closed there because qemu implements none of its calls.
 
-Nor is `AF_VSOCK` refused anywhere on an emulated worker: the sandbox cannot
-install its filter, and runs each container and each host-side step anyway,
-after a warning, which the worker also logs at startup. A filter installed
-natively does hold an emulated program, since the kernel sees qemu's own
-calls: Docker's default seccomp profile refuses `AF_VSOCK` to an emulated
-container as it does to a native one. A privileged container gets no profile
-at all, though, so an emulated worker in a virtual machine leaves vsock open
-to its builds. Run it on a machine with no vsock device, or keep the vsock
-modules from loading there.
+Nor is `AF_VSOCK` refused on an emulated worker: the sandbox cannot install
+its filter, and builds anyway, with a warning in each build's log. In a
+virtual machine, run an emulated worker only where there is no vsock device,
+or keep the vsock modules from loading.
 :::
 
 ## Swarm and other runtimes

@@ -4,21 +4,13 @@
 //! aurcache-sandbox container -- PROGRAM [ARGS]...
 //! ```
 //!
-//! The patched build script starts every container it makes through this,
-//! so that the container and everything in it are held to [`NO_VSOCK`]:
-//! no `AF_VSOCK` socket, which no network namespace confines and no network
-//! policy sees, and no io_uring, which would create one without `socket`.
-//! The filter is installed here, on the host, and `systemd-nspawn` and the
-//! container inherit it, whatever ABI the container's programs call through
-//! (see `seccomp.rs`). Why not nspawn's own address-family option: see "The
-//! container" in `design/proposed/build-runner.md`.
+//! The patched build script starts every container through this, so nspawn
+//! and the container inherit [`Policy::NoVsock`], installed here on the host
+//! (why not nspawn's own option: "The container" in
+//! `design/proposed/build-runner.md`). Where no filter can be installed, the
+//! program runs after a warning.
 //!
-//! Run as root, as the build script is, it needs nothing else. Where no
-//! filter can be installed -- an emulated worker, whose qemu refuses one --
-//! the program runs anyway, after a warning on stderr: an emulated worker
-//! builds, with vsock open, rather than not at all.
-//!
-//! [`NO_VSOCK`]: crate::seccomp::NO_VSOCK
+//! [`Policy::NoVsock`]: crate::seccomp::Policy::NoVsock
 
 use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
