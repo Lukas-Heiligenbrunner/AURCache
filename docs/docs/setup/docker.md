@@ -44,7 +44,8 @@ volumes:
 
 That is the database, the package repository, the internal worker CA (with the
 repository's [signing key](../Configuration/pacman-repo.md#signing-the-repository)
-beside it, when it is signed), each build's log and the source cache. Mounting the pieces individually works and is
+beside it, when it is signed), the SSH key for cloning private package
+sources, each build's log and the source cache. Mounting the pieces individually works and is
 the right thing when they belong on different storage — a large repository on
 bulk disks, the database on an SSD — but then **anything you do not mount lives
 in the container and is gone when the container is replaced**, which happens on
