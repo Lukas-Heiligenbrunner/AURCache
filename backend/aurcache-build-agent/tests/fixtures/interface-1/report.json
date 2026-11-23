@@ -1,0 +1,95 @@
+[
+  {
+    "interface": 1,
+    "ended": {
+      "how": "exited",
+      "code": 0
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "exited",
+      "code": 4
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "signaled",
+      "signal": 9
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "spec",
+      "message": "No such file or directory (os error 2)"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "config",
+      "message": "No such file or directory (os error 2)"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "keyring",
+      "message": "No such file or directory (os error 2)"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "sync",
+      "message": "No such file or directory (os error 2)"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "user",
+      "message": "No such file or directory (os error 2)"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "source",
+      "message": "No such file or directory (os error 2)"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "keys",
+      "message": "No such file or directory (os error 2)"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "dependencies",
+      "message": "No such file or directory (os error 2)"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "makepkg",
+      "message": "No such file or directory (os error 2)"
+    }
+  }
+]

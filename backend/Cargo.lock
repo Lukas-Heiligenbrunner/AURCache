@@ -722,6 +722,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurcache-build-agent"
+version = "0.1.0"
+dependencies = [
+ "aurcache-common",
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "aurcache-ca"
 version = "0.1.0"
 dependencies = [

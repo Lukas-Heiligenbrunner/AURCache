@@ -52,3 +52,8 @@ test-kernel:
 # What pacman makes of a signed repository, in an Arch container
 test-signed-repo:
   ./scripts/test-signed-repo.sh
+
+# The build agent, statically linked, running builds in the builder image
+# under a build container's flags (docker)
+test-agent:
+  ./scripts/test-build-agent.sh
