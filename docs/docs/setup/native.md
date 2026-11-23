@@ -169,7 +169,8 @@ root`, anything but a regular file, or a symlink to nothing or a path reached
 through one, refuses every build. Only a missing file means "protect nothing".
 A list naming `/`, or a path that resolves to it, refuses every build too: a
 build that can read nothing cannot run, so name the directories to protect
-instead.
+instead. List one path per line. Comments start with `#` at the start of a
+line or after whitespace, as in a shell, so a path cannot contain ` #`.
 
 ## Both on one machine
 
