@@ -4,8 +4,9 @@
 //! The server decides: a job names a key -- the package's `build_ssh_key`
 //! setting -- or, by naming none, asks for [`ssh_key::DEFAULT`], the worker's
 //! own. The worker offers the key by that name when it holds one: a lookup in
-//! the sockets of the agents it started, by key name, never anything derived
-//! from the name.
+//! the keys it holds, by key name, never anything derived from the name. What
+//! a held key is depends on the worker: the socket of an agent it started, or
+//! the files it starts one from for each build.
 //!
 //! [`offer`] says what the claimed job's build is offered, as an
 //! [`SshOffer`]: the build is handed [`SshOffer::key`] when there is one,
@@ -15,31 +16,30 @@
 use aurcache_common::ssh_key;
 use aurcache_common::worker::JobDescriptor;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
-/// What a build is offered of its worker's SSH keys.
+/// What a build is offered of its worker's SSH keys, each held as a `K`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SshOffer<'k> {
-    /// The key `name`, whose agent's socket is `key`.
-    Offered { name: String, key: &'k PathBuf },
+pub enum SshOffer<'k, K> {
+    /// The key `name`, held as `key`.
+    Offered { name: String, key: &'k K },
     /// The job names a key this worker does not hold. The build goes ahead
     /// without one: most never use it, and one that does fails at the fetch
     /// that needed it, with the notice above it in its log.
     NotHeld { name: String },
     /// The job names a key this worker holds, but no longer offers: the
     /// sandbox stopped keeping builds from the named keys' agents, and the
-    /// worker stopped them (see `agent::NamedKeysGate`). The build goes ahead
-    /// without one, as for a key not held.
+    /// worker stopped them (see the chroot worker's `agent::NamedKeysGate`).
+    /// The build goes ahead without one, as for a key not held.
     Withheld { name: String },
     /// No key, and nothing to say: the job asks for the default key on a
     /// worker that holds none.
     NoKey,
 }
 
-impl<'k> SshOffer<'k> {
-    /// The socket of the agent to hand the build, if any.
+impl<'k, K> SshOffer<'k, K> {
+    /// The key to hand the build, if any.
     #[must_use]
-    pub fn key(&self) -> Option<&'k PathBuf> {
+    pub fn key(&self) -> Option<&'k K> {
         match self {
             Self::Offered { key, .. } => Some(key),
             Self::NotHeld { .. } | Self::Withheld { .. } | Self::NoKey => None,
@@ -67,15 +67,15 @@ impl<'k> SshOffer<'k> {
     }
 }
 
-/// What `job`'s build is offered of `keys`, the sockets of the agents this
-/// worker started, by key name: of the named ones, those other than
-/// [`ssh_key::DEFAULT`], only while `named_keys_held`.
+/// What `job`'s build is offered of `keys`, the keys this worker holds, by
+/// key name: of the named ones, those other than [`ssh_key::DEFAULT`], only
+/// while `named_keys_held`.
 #[must_use]
-pub fn offer<'k>(
+pub fn offer<'k, K>(
     job: &JobDescriptor,
-    keys: &'k BTreeMap<String, PathBuf>,
+    keys: &'k BTreeMap<String, K>,
     named_keys_held: bool,
-) -> SshOffer<'k> {
+) -> SshOffer<'k, K> {
     match &job.ssh_key {
         // The default key, as every job asks for unless its package names
         // another; silent when this worker holds none.
@@ -102,6 +102,7 @@ pub fn offer<'k>(
 mod tests {
     use super::*;
     use aurcache_common::worker::MirrorlistOffer;
+    use std::path::PathBuf;
 
     fn job(ssh_key: Option<&str>) -> JobDescriptor {
         JobDescriptor {
@@ -127,7 +128,7 @@ mod tests {
         BTreeMap::from([(ssh_key::DEFAULT.to_string(), PathBuf::from("/agent.sock"))])
     }
 
-    fn offered<'k>(name: &str, key: &'k PathBuf) -> SshOffer<'k> {
+    fn offered<'k>(name: &str, key: &'k PathBuf) -> SshOffer<'k, PathBuf> {
         SshOffer::Offered {
             name: name.to_string(),
             key,
@@ -215,7 +216,7 @@ mod tests {
     /// one whose package names a key still hears that it is not here.
     #[test]
     fn a_worker_without_keys_is_silent_unless_a_key_is_named() {
-        let keys = BTreeMap::new();
+        let keys = BTreeMap::<String, PathBuf>::new();
         let offer_default = offer(&job(None), &keys, true);
         assert_eq!(offer_default, SshOffer::NoKey);
         assert_eq!(offer_default.notice("hello"), None);
