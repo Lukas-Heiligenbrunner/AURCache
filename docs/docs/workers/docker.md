@@ -96,13 +96,20 @@ noted in the build log, since a PKGBUILD often lists keys no source of the
 version is signed with; a build that needed the key then fails at makepkg's
 signature check.
 
-When the build ends, the agent writes a report of how makepkg ended into
-`out/` in the build directory. A build with no report is handed back as the
-worker's, and queued again while the package has attempts left. That is
-what happens when a build fills the filesystem that holds
-`BUILD_ARTIFACT_DIR`, or when root in the build (a dependency's install
-script) ends it early: it can keep the report from being written, but cannot
-forge one. Nothing limits a build's disk use on this worker, so leave room
+When the build ends, the agent writes a report into `out/` in the build
+directory: how makepkg ended, the build's disk use, the commits of its VCS
+sources, and its peak memory and out-of-memory kills. Those two are read from
+the container's own cgroup (cgroup v2; on a host without it they are left
+unknown), so they cover the whole container, the image's upgrade and the
+dependencies' install included. That is where the figures on a build's page
+come from. An out-of-memory failure says so and names `MEMORY_LIMIT`.
+
+A build with no report fails if the engine says the container was killed for
+memory. Otherwise it is handed back as the worker's, and queued again while
+the package has attempts left. That is what happens when a build fills the
+filesystem that holds `BUILD_ARTIFACT_DIR`, or when root in the build (a
+dependency's install script) ends it early: it can keep the report from being
+written, but cannot forge one. Nothing limits a build's disk use on this worker, so leave room
 there for the largest.
 
 ### What a build may do

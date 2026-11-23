@@ -1,9 +1,10 @@
-//! What the agent hands back: how the build ended.
+//! What the agent hands back: how the build ended and what it measured.
 //!
 //! Within one [`INTERFACE`](crate::spec::INTERFACE) these types only gain
 //! optional fields; anything else is the next interface.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// `<work>/out/report.json`, written last, once nothing the build started is
 /// still running.
@@ -11,6 +12,31 @@ use serde::{Deserialize, Serialize};
 pub struct BuildReport {
     pub interface: u32,
     pub ended: Ended,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oom_kills: Option<u64>,
+    /// Bytes under the work and scratch directories when the build ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
+    /// Keyed by `JobVcsSource::source_url`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vcs_commits: BTreeMap<String, String>,
+}
+
+impl BuildReport {
+    /// A report of how the build ended, with nothing measured.
+    #[must_use]
+    pub fn unmeasured(ended: Ended) -> Self {
+        Self {
+            interface: crate::spec::INTERFACE,
+            ended,
+            peak_memory_bytes: None,
+            oom_kills: None,
+            disk_bytes: None,
+            vcs_commits: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -16,6 +16,7 @@
 //! (`crate::srcdest_lock`), so no sibling build can fetch into the mirror
 //! between the build ending and this read.
 
+use aurcache_common::source::ref_candidates;
 use aurcache_common::worker::JobVcsSource;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -43,37 +44,14 @@ pub async fn resolve(sources: &[JobVcsSource], srcdest: Option<&Path>) -> BTreeM
     resolved
 }
 
-/// The candidates, in the order the server's `ls_remote` prefers them.
-///
-/// It matters that this matches: `git rev-parse` resolves a bare name by its
-/// own rules, which prefer a tag over a branch, while `ls_remote` walks the
-/// remote's advertisement preferring `refs/heads`. A repository carrying both a
-/// branch and a tag of one name would then have the two ends disagree forever,
-/// each rebuild "detecting" a move that never happened.
-///
-/// There is deliberately no `HEAD` fallback: an unknown ref resolves to
-/// nothing rather than to the mirror's own `HEAD`, which would silently agree
-/// with the server's old fallback and track the default branch tip.
-fn candidates(git_ref: &str) -> Vec<String> {
-    if git_ref == "HEAD" {
-        return vec!["HEAD".to_string()];
-    }
-    let mut candidates = Vec::new();
-    if git_ref.starts_with("refs/") {
-        candidates.push(git_ref.to_string());
-    }
-    candidates.push(format!("refs/heads/{git_ref}"));
-    candidates.push(format!("refs/tags/{git_ref}"));
-    candidates
-}
-
-/// Ask git what a ref points at, without peeling it.
+/// Ask git what a ref points at, without peeling it, trying its candidates in
+/// the order the server does ([`ref_candidates`]).
 ///
 /// Un-peeled deliberately: `ls_remote` reports the object a ref advertises, so
 /// for an annotated tag it reports the tag object. Peeling here would report
 /// the commit instead, and the two would never compare equal.
 async fn rev_parse(dir: &Path, git_ref: &str) -> Option<String> {
-    for candidate in candidates(git_ref) {
+    for candidate in ref_candidates(git_ref) {
         let output = Command::new("git")
             // The mirror belongs to the build user, not to the worker, so git
             // refuses it as "dubious ownership" without this.
@@ -100,41 +78,8 @@ async fn rev_parse(dir: &Path, git_ref: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{candidates, resolve};
+    use super::resolve;
     use aurcache_common::worker::JobVcsSource;
-
-    /// Branches before tags, and the literal only when it is already a full
-    /// ref path -- the order the server resolves in.
-    #[test]
-    fn candidates_prefer_a_branch_the_way_the_server_does() {
-        assert_eq!(
-            candidates("main"),
-            vec!["refs/heads/main".to_string(), "refs/tags/main".to_string()]
-        );
-        assert_eq!(
-            candidates("refs/heads/main").first().map(String::as_str),
-            Some("refs/heads/main"),
-            "a fragment that already names a full ref is tried as given"
-        );
-        assert_eq!(
-            candidates("HEAD"),
-            vec!["HEAD".to_string()],
-            "and an unqualified HEAD still ends at the mirror's own HEAD"
-        );
-    }
-
-    /// An unknown ref resolves to nothing rather than to the mirror's HEAD:
-    /// falling back meant a `#tag=<sha>` pin agreed with the server's old
-    /// fallback and tracked the default branch tip together.
-    #[test]
-    fn unknown_refs_do_not_fall_back_to_head() {
-        for git_ref in ["6e481d6bf0a69f8c9bd2866eb491e1e4e9b0717f", "no-such-branch"] {
-            assert!(
-                !candidates(git_ref).contains(&"HEAD".to_string()),
-                "{git_ref} must not resolve to HEAD"
-            );
-        }
-    }
 
     /// A worker with no source cache, or a source that was never fetched,
     /// reports nothing rather than guessing.

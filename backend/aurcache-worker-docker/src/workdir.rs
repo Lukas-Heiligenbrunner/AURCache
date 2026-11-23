@@ -131,6 +131,7 @@ mod tests {
             mirrorlist: None,
             pgp_keys: vec![],
             keyserver: "hkps://keys.example".into(),
+            vcs_sources: vec![],
             cpus: None,
             scratch: "/var/lib/aurcache-build".into(),
         }
@@ -180,8 +181,8 @@ mod tests {
         assert_eq!(report(scratch.path()), Report::Absent);
 
         let written = BuildReport {
-            interface: INTERFACE,
-            ended: Ended::Exited { code: 0 },
+            peak_memory_bytes: Some(1),
+            ..BuildReport::unmeasured(Ended::Exited { code: 0 })
         };
         let out = Work::new(scratch.path()).out();
         fs::create_dir_all(&out).unwrap();

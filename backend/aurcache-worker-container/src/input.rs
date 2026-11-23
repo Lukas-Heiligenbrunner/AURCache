@@ -44,6 +44,7 @@ mod tests {
             mirrorlist: None,
             pgp_keys: vec![],
             keyserver: "hkps://keys.example".into(),
+            vcs_sources: vec![],
             cpus: Some(2.0),
             scratch: "/scratch".into(),
         }

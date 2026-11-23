@@ -13,7 +13,7 @@ use aurcache_build_agent::layout::Work;
 use aurcache_common::worker::{BuildOutcome, CompleteReport};
 use aurcache_worker_container::agent;
 use aurcache_worker_container::arch::{self, Platform};
-use aurcache_worker_container::outcome;
+use aurcache_worker_container::outcome::{self, MemoryLimit};
 use aurcache_worker_container::spec::{self, SpecOptions};
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
@@ -24,8 +24,8 @@ use aurcache_worker_core::settings::{DEFAULT_KEYSERVER, WorkerSettings};
 use bollard::Docker;
 use bollard::models::ContainerCreateBody;
 use bollard::query_parameters::{
-    AttachContainerOptions, CreateContainerOptions, CreateImageOptions, KillContainerOptions,
-    StartContainerOptions, WaitContainerOptions,
+    AttachContainerOptions, CreateContainerOptions, CreateImageOptions, InspectContainerOptions,
+    KillContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use futures::StreamExt;
 use std::path::{Path, PathBuf};
@@ -35,7 +35,7 @@ use std::time::Duration;
 use crate::cleanup::{self, Leftover};
 use crate::config::{BuildDirs, Config};
 use crate::container::{self, Build};
-use crate::ending::ending;
+use crate::ending::{Verdict, ending};
 use crate::network::{self, NetworkPlan};
 use crate::workdir::{self, Report};
 
@@ -227,11 +227,24 @@ impl DockerExecutor {
         });
         let id = self.create(target, body).await?;
         let run = self.run_container(client, claimed, &id).await;
+        let oom_killed = match &run {
+            Ok(_) => self.oom_killed(&id).await,
+            Err(_) => false,
+        };
         self.remove_container(&id).await;
         let run = run?;
 
         let left = read_report(&target.dirs.local).await;
-        let report = outcome::complete(run.stop, run.elapsed, ending(left, run.status));
+        let verdict = Verdict {
+            status: run.status,
+            oom_killed,
+        };
+        let report = outcome::complete(
+            run.stop,
+            run.elapsed,
+            ending(left, verdict),
+            memory_limit(cfg),
+        );
         if report.outcome == BuildOutcome::Succeeded {
             upload_artifacts(client, build_id, &Work::new(&target.dirs.local).pkg()).await?;
         }
@@ -339,6 +352,18 @@ impl DockerExecutor {
         })
     }
 
+    /// Whether the engine says the kernel's OOM killer ended a process in
+    /// the container; no, when it cannot say.
+    async fn oom_killed(&self, container_id: &str) -> bool {
+        self.docker
+            .inspect_container(container_id, None::<InspectContainerOptions>)
+            .await
+            .ok()
+            .and_then(|inspected| inspected.state)
+            .and_then(|state| state.oom_killed)
+            .unwrap_or(false)
+    }
+
     async fn remove_container(&self, name_or_id: &str) {
         cleanup::remove_container(&self.docker, name_or_id).await;
     }
@@ -389,6 +414,15 @@ fn spec_options(cfg: &Config) -> SpecOptions {
         keyserver: DEFAULT_KEYSERVER.to_string(),
         scratch: PathBuf::from(container::SCRATCH),
     }
+}
+
+/// The memory limit this worker set, for naming in an out-of-memory failure.
+fn memory_limit(cfg: &Config) -> Option<MemoryLimit> {
+    let bytes = cfg.tunables.memory_bytes()?;
+    Some(MemoryLimit {
+        bytes: u64::try_from(bytes).ok()?,
+        variable: "MEMORY_LIMIT",
+    })
 }
 
 impl Executor for DockerExecutor {

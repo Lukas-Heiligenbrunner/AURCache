@@ -17,9 +17,11 @@
 
 use aurcache_build_agent::report::{BuildReport, Ended, SetupStep};
 use aurcache_build_agent::spec::{BuildSpec, INTERFACE};
+use aurcache_common::worker::JobVcsSource;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn fixture(name: &str) -> PathBuf {
@@ -57,11 +59,10 @@ fn check<T: Serialize + DeserializeOwned>(name: &str, samples: &[T]) -> Vec<Valu
 }
 
 fn report(ended: Ended) -> BuildReport {
-    BuildReport {
-        interface: INTERFACE,
-        ended,
-    }
+    BuildReport::unmeasured(ended)
 }
+
+const SOURCE: &str = "git+https://example.test/repo.git#branch=main";
 
 fn specs() -> Vec<BuildSpec> {
     let full = BuildSpec {
@@ -75,6 +76,7 @@ fn specs() -> Vec<BuildSpec> {
         mirrorlist: Some("Server = https://mirror.test/$repo/os/$arch\n".to_string()),
         pgp_keys: vec!["ABAF11C65A2970B130ABE3C479BE3E4300411886".to_string()],
         keyserver: "hkps://keyserver.ubuntu.com".to_string(),
+        vcs_sources: Vec::new(),
         cpus: Some(2.5),
         scratch: PathBuf::from("/work/scratch"),
     };
@@ -87,7 +89,15 @@ fn specs() -> Vec<BuildSpec> {
         scratch: PathBuf::from("/var/lib/aurcache-build"),
         ..full.clone()
     };
-    vec![full, bare]
+    let with_sources = BuildSpec {
+        vcs_sources: vec![JobVcsSource {
+            source_url: SOURCE.to_string(),
+            dir: "repo".to_string(),
+            git_ref: "main".to_string(),
+        }],
+        ..full.clone()
+    };
+    vec![full, bare, with_sources]
 }
 
 fn reports() -> Vec<BuildReport> {
@@ -116,6 +126,16 @@ fn reports() -> Vec<BuildReport> {
         report(Ended::Signaled { signal: 9 }),
     ];
     all.append(&mut steps);
+    all.push(BuildReport {
+        peak_memory_bytes: Some(121_000_000),
+        oom_kills: Some(0),
+        disk_bytes: Some(52_428_800),
+        vcs_commits: BTreeMap::from([(
+            SOURCE.to_string(),
+            "6e481d6bf0a69f8c9bd2866eb491e1e4e9b0717f".to_string(),
+        )]),
+        ..report(Ended::Exited { code: 0 })
+    });
     all
 }
 

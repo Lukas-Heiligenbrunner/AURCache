@@ -5,8 +5,8 @@
 #
 # It builds the agent as it ships (statically linked) and runs four legs:
 #
-#   1. docker/testpkg/hello builds: a report, and one package handed back to
-#      the work directory's owner;
+#   1. docker/testpkg/hello builds: a report, measurements, and one package
+#      handed back to the work directory's owner;
 #   2. docker/testpkg/agent-hostile builds, and both while its dependencies
 #      are read from it and from inside build() tries to become root, find
 #      anything of root's to talk to, and write the report. Both polarities:
@@ -57,6 +57,8 @@ CAPABILITIES=(CHOWN DAC_OVERRIDE FOWNER FSETID SETUID SETGID KILL)
 CONTAINER_FLAGS=(--user 0 --security-opt no-new-privileges --cap-drop=ALL "${CAPABILITIES[@]/#/--cap-add=}")
 # The longest one build may take before the leg is given up.
 BUILD_TIMEOUT=1800
+# What the hostile fixture is told its source is, and the same seen from here.
+FIXTURE_SOURCE="fixture::git+file:///srv/aurcache-agent-test/upstream.git"
 
 WORK=$(mktemp -d)
 CONTAINERS=()
@@ -99,12 +101,12 @@ prepare() {
     mkdir -p "$WORK/$leg/in" "$WORK/stage/$leg/$pkgbase"
     cp -r "$fixture/." "$WORK/stage/$leg/$pkgbase/"
     tar -czf "$WORK/$leg/in/source.tar.gz" -C "$WORK/stage/$leg" "$pkgbase"
-    python3 - "$WORK/$leg/in/spec.json" "$pkgbase" "$arch" \
+    python3 - "$WORK/$leg/in/spec.json" "$pkgbase" "$arch" "$FIXTURE_SOURCE" \
         "interface=$INTERFACE" "$@" <<'EOF'
 import json, sys
 
-path, pkgbase, arch = sys.argv[1:4]
-options = dict(option.split("=", 1) for option in sys.argv[4:])
+path, pkgbase, arch, fixture_source = sys.argv[1:5]
+options = dict(option.split("=", 1) for option in sys.argv[5:])
 
 # What the server renders for a job: its base pacman.conf for the
 # architecture, and its own makepkg assignments after the operator's.
@@ -154,6 +156,11 @@ spec = {
     "mirrorlist": None,
     "pgp_keys": [],
     "keyserver": "hkps://keyserver.ubuntu.com",
+    "vcs_sources": (
+        [{"source_url": fixture_source, "dir": "fixture", "git_ref": "HEAD"}]
+        if "vcs" in options
+        else []
+    ),
     "cpus": float(options["cpus"]) if "cpus" in options else None,
     "scratch": "/var/lib/aurcache-build",
 }
@@ -212,6 +219,11 @@ print(json.dumps(value, sort_keys=True))' "$WORK/$1/out/report.json" "${@:2}" 2>
         echo "<none>"
 }
 
+# Whether a field of a leg's report is a number above zero.
+measured() { # leg field
+    [[ $(report "$1" "$2") =~ ^[1-9][0-9]*$ ]] && echo yes || echo no
+}
+
 # What a fixture's probe said.
 probe() { # leg name
     local line
@@ -230,6 +242,9 @@ check_hello() { # leg status
     local leg=$1 status=$2 package
     check "$leg: the agent exited 0" 0 "$status"
     check "$leg: makepkg exited 0" '{"code": 0, "how": "exited"}' "$(report "$leg" ended)"
+    check "$leg: a peak memory figure" yes "$(measured "$leg" peak_memory_bytes)"
+    check "$leg: a disk figure" yes "$(measured "$leg" disk_bytes)"
+    check "$leg: no out-of-memory kill" 0 "$(report "$leg" oom_kills)"
     check "$leg: one thing in pkg/" 1 "$(packages "$leg" | wc -l)"
     package=$(packages "$leg" | head -n1)
     check "$leg: and it is the package" yes \
@@ -318,6 +333,7 @@ git -C "$WORK/stage/upstream" add README
 git -C "$WORK/stage/upstream" -c user.name=test -c user.email=test@aurcache.test commit -qm fixture
 git init -q --bare -b master "$WORK/upstream.git"
 git -C "$WORK/stage/upstream" push -q "$WORK/upstream.git" master
+commit=$(git -C "$WORK/stage/upstream" rev-parse HEAD)
 HOSTILE_FLAGS=(-v "$WORK/upstream.git:/srv/aurcache-agent-test/upstream.git:ro")
 
 prepare hostile docker/testpkg/agent-hostile aurcache-agent-hostile "$(uname -m)" vcs=1 \
@@ -375,6 +391,9 @@ fi
 check "hostile: the thief's scriptlet ran as root" yes "$(probe hostile thief-ran)"
 check "hostile: and could not read the agent's memory" refused "$(probe hostile thief-mem)"
 check "hostile: orphaned processes are collected" 0 "$(probe hostile zombies)"
+# Seen from here: the report is the agent's, and names the source's commit.
+check "hostile: the source's commit is reported" "\"$commit\"" \
+    "$(report hostile vcs_commits "$FIXTURE_SOURCE")"
 check "hostile: out/ holds the report and nothing else" report.json \
     "$(find "$WORK/hostile/out" -mindepth 1 -printf '%P\n' | sort | paste -sd' ')"
 check "hostile: nothing was planted beside it" absent "$(present "$WORK/hostile/planted")"

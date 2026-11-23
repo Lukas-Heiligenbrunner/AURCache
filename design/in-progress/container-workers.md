@@ -237,8 +237,15 @@ the runtime:
    and a build missing one fails with makepkg's own message. Its output
    goes to the agent's stdout.
 8. **Afterwards.** Kill whatever the build left running: as PID 1,
-   `kill(-1, SIGKILL)` reaches every other process in the container.
-9. **Hand back.** Remove `out/`, which must be the empty directory it was,
+   `kill(-1, SIGKILL)` reaches every other process in the container. Then,
+   as the build user, ask git what each VCS source was at (as the build
+   user because git on a repository that the build wrote reads
+   configuration that the build chose).
+9. **Measure**: `memory.peak` and `memory.events`' `oom_kill` from the
+   container's own cgroup, found through `/proc/self/cgroup` so that a
+   container sharing the host's cgroup namespace does not read the host's;
+   the bytes under the work and scratch directories.
+10. **Hand back.** Remove `out/`, which must be the empty directory it was,
    make it again and write `out/report.json` there; then give the work
    directory, and `pkg/` and `out/` with the regular files in them, back to
    whoever owned it, readable by anyone. Last, after step 8, so nothing the
@@ -312,6 +319,11 @@ so the install runs with that network; and its root has none of
 pub struct BuildReport {
     pub interface: u32,
     pub ended: Ended,
+    // Each optional, and left out of the JSON when unknown.
+    pub peak_memory_bytes: Option<u64>,
+    pub oom_kills: Option<u64>,
+    pub disk_bytes: Option<u64>,
+    pub vcs_commits: BTreeMap<String, String>,
 }
 
 pub enum Ended {
@@ -346,6 +358,8 @@ job, whatever engine its containers come from, and nothing of one engine:
   reason whatever engine ran it. It takes the worker's stop (cancel,
   timeout) first, then the report, then what the engine said when there is
   no report.
+- **the out-of-memory wording**, naming the worker's own limit and its
+  variable;
 - **what is not supported**: a job that asks for a persistent build
   directory is built in a fresh tree, and only a debug line on the worker
   says so. The setting is on by default, so anything louder would be on
@@ -371,8 +385,11 @@ without depending on a worker crate, and the existing callers keep their
 paths: `build_deps`, which dependencies a build installs, read from
 `makepkg --printsrcinfo`'s output and the job's flags, so a package cannot
 build on one worker and miss a dependency on the other; and `parallelism`,
-the `makepkg.conf` lines that size a build's jobs to its CPU limit. Nothing
-else of the chroot worker changes.
+the `makepkg.conf` lines that size a build's jobs to its CPU limit. The
+order a git ref's candidates are tried in moves too, for the agent's VCS
+commits: it has to match the server's, or the two ends disagree about a
+repository with a branch and a tag of one name. Nothing else of the chroot
+worker changes.
 
 ---
 
@@ -395,7 +412,8 @@ For each job the worker now:
    | limits, network, platform, name | | unchanged |
 
 3. streams the container's output into the build log, as before;
-4. reads `out/report.json`;
+4. reads `out/report.json`, and asks the engine whether the container was
+   killed for memory when there is none;
 5. uploads `pkg/` with `upload_artifacts`, as before (the packages are on a
    disk the worker has anyway), and removes the directory.
 
@@ -404,6 +422,8 @@ What an operator sees change:
 - **Builds run without sudo and without capabilities.** The paragraph in the
   documentation about qemu's `C` flag goes: nothing in a build is setuid any
   more, and the agent itself is not emulated.
+- **Builds report their peak memory, their disk use and their VCS commits**,
+  and an out-of-memory failure says so, naming `MEMORY_LIMIT`.
 - **A failure before makepkg** (the mirror is down) is reported as the
   worker's, and the server ends the build and queues a new one, where it used
   to fail the package. A PGP key that cannot be fetched is not such a
@@ -420,7 +440,8 @@ fresh tree, silently), kept failed builds, caches, SSH build credentials.
 ### With Podman, rootless engines, and the hybrid image
 
 The hybrid image's own Podman (`userns = "host"`, `cgroupns = "host"`) takes
-the same container options through its Docker-compatible socket. Under a
+the same container options through its Docker-compatible socket. Its builds
+find their cgroup through `/proc/self/cgroup` (step 9 above). Under a
 rootless or user-namespaced engine, root in the container is not the host's
 root; the hand-back's `chown` is to an id inside that mapping, and if it is
 refused the agent falls back to making `pkg/` and `out/` writable by
@@ -439,7 +460,7 @@ What changes is inside the build container:
 | build code as root in the container | one `sudo pacman -U` away | not directly: no `sudo`, no capabilities, `no_new_privs`, and nothing of root's to ask once makepkg runs; but the PKGBUILD names the packages root installs before the build, any the synced repositories have, and a package's install scriptlet runs as root |
 | root in the container, when something does run as root (a dependency's install script) | the engine's default capabilities (14 on Docker) | seven |
 | what the build can write that the worker reads | the whole shared directory, world-writable | as the build user, `pkg/` only; as root in the container (a dependency's install script), anything in the directory, before the build starts |
-| how the worker reads it back | by path, following links, waiting on pipes, without a limit | one name at a time from its parent's handle, following no link and waiting on no pipe: the report a regular file of at most 1 MiB, believed only beside an agent that exited 0; the packages regular files in a `pkg/` that is a directory of its own, uploaded from the handle they were judged by |
+| how the worker reads it back | by path, following links, waiting on pipes, without a limit | one name at a time from its parent's handle, following no link and waiting on no pipe: the report a regular file of at most 1 MiB, believed only beside an agent that exited 0, which writes it after every other process is dead; the packages regular files in a `pkg/` that is a directory of its own, uploaded from the handle they were judged by |
 | who can stop the build | the engine, and anything in the container | the engine; root in the container can end it early, as interrupted, but cannot forge its result: PID 1 has no signal handler and cannot be traced from inside, but its resource limits and `oom_score_adj` can be changed |
 | a setuid file left in the build directory | possible, as root in the container | still possible (Docker cannot mount a bind `nosuid`); the directory builds go in is made `0700`, and the worker warns when it is open to others, so nobody else on the host can run one |
 | what the build can make root do | `pacman` with any arguments, `chmod` with any arguments | before makepkg starts, install packages by name from the job's repositories; once it has, nothing |
