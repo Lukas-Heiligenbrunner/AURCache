@@ -32,6 +32,7 @@ rand_core = "0.10"
 
 aurcache-db = {path = "../aurcache-db"}
 aurcache-ca = {path = "../aurcache-ca"}
+aurcache-signing = {path = "../aurcache-signing"}
 aurcache-activitylog = {path = "../aurcache-activitylog"}
 aurcache-utils = {path = "../aurcache-utils"}
 pacman-mirrors = {path = "../pacman-mirrors"}
@@ -53,6 +54,4 @@ wasm-bindgen-cli-support = { version = "=0.2.130", optional = true }
 aurcache-db = { path = "../aurcache-db", features = ["testing"] }
 # The version test reads the answer the way the CLI and the browser do.
 aurcache-client = { path = "../aurcache-client" }
-# The repository tests serve a signing repository's key.
-aurcache-signing = { path = "../aurcache-signing" }
 tempfile = { workspace = true }

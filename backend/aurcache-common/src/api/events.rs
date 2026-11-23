@@ -514,6 +514,13 @@ events! {
     /// hold is now worthless, and each has to enroll again.
     RestoreCaReplaced => ("restore.ca_replaced", "Backups", "Worker CA replaced") {},
 
+    /// A restore wrote the dump's signing key over this server's, which signs
+    /// with it from its next start with signing on: every client has to trust
+    /// it by then.
+    RestoreSigningKeyReplaced => ("restore.signing_key_replaced", "Backups", "Signing key restored") {
+        fingerprint: String,
+    },
+
     // -----------------------------------------------------------------------
     // Mirrors and the repository
     // -----------------------------------------------------------------------
@@ -814,6 +821,7 @@ impl Event {
             | Self::SignInRefused { .. }
             | Self::RestorePackageFailed { .. }
             | Self::RestoreCaReplaced {}
+            | Self::RestoreSigningKeyReplaced { .. }
             | Self::WorkersUntrusted { .. }
             | Self::MirrorRankFailed { .. }
             | Self::OfficialReposRefreshFailed { .. }
@@ -1259,6 +1267,11 @@ impl Event {
             Self::RestoreCaReplaced {} => vec![text(
                 "a restore replaced the worker CA; every worker has to enroll again",
             )],
+            Self::RestoreSigningKeyReplaced { fingerprint } => vec![text(format!(
+                "a restore replaced the repository signing key with {fingerprint}; the server \
+                 signs with it from its next start with signing on, and every client has to \
+                 trust it then"
+            ))],
             Self::MirrorRankFailed { error } => {
                 vec![text(format!("could not rank the mirrors: {error}"))]
             }
@@ -1568,6 +1581,9 @@ mod tests {
                 error: error(),
             },
             Event::RestoreCaReplaced {},
+            Event::RestoreSigningKeyReplaced {
+                fingerprint: "0123456789ABCDEF0123456789ABCDEF01234567".to_string(),
+            },
             Event::WorkersUntrusted {
                 workers: vec!["builder-01".to_string()],
             },

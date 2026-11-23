@@ -36,6 +36,9 @@ pub(crate) async fn restore_command(
             }
             println!("would apply {} package(s):", accepted.total);
             accepted.preview.iter().for_each(print_restore_entry);
+            if let Some(key) = accepted.signing_key {
+                println!("{}", key.line(true));
+            }
         })?;
         // A dry run that found something blocking exits non-zero, so
         // `restore --dry-run && restore` cannot walk into the failure it was
@@ -51,6 +54,9 @@ pub(crate) async fn restore_command(
 
     if format == OutputFormat::Text {
         println!("restoring {} package(s), job {job_id}", accepted.total);
+        if let Some(key) = accepted.signing_key {
+            println!("{}", key.line(false));
+        }
     }
     let run: RestoreProgress = follow_job(
         format,
