@@ -6,6 +6,7 @@
 //! consumer can take `default-features = false` and still get the types.
 
 pub mod api;
+pub mod build_deps;
 pub mod build_flags;
 pub mod build_state;
 /// SHA-256 as lowercase hex. Requires the `digest` feature.
@@ -15,6 +16,7 @@ pub mod digest;
 /// a browser, so wasm consumers leave it off.
 #[cfg(feature = "fs")]
 pub mod fs;
+pub mod parallelism;
 pub mod ports;
 pub mod repo;
 pub mod schedule;
