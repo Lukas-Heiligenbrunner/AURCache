@@ -29,6 +29,7 @@ tar = { workspace = true }
 percent-encoding = "2.3"
 url = "2"
 ipnet = "2.12"
+nix = { version = "0.31", default-features = false, features = ["net"] }
 aurcache-common = { path = "../aurcache-common", features = ["digest"] }
 aurcache-worker-core = { path = "../aurcache-worker-core" }
 aurcache-chroot = { path = "../aurcache-chroot" }

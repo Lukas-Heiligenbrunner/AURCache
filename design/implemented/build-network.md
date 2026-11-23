@@ -45,15 +45,15 @@ explicitly. For each address family, in order:
 4. **Local destinations: reject.** That covers:
    - fixed ranges: loopback, 0/8, 10/8, 172.16/12, 192.168/16, 169.254/16,
      100.64/10, 240/4 (reserved, with the limited broadcast address),
-     fc00::/7, fe80::/10 and multicast. 240/4 follows, in a later PR of this
-     chain; until then the limited broadcast address is refused on its own;
+     fc00::/7, fe80::/10 and multicast;
    - every address of the worker host itself (`fib daddr type local`, which
      also catches the host's public addresses);
-   - *(Follows, in a later PR of this chain.)* **the host's links**: the
-     prefix of every address on its interfaces. That is what
-     makes a LAN on public IPv4 addresses, or the global IPv6 addresses of a
-     dual-stack LAN (the router, a NAS, the server's 2000::/3 address),
-     local;
+   - **the host's links**: the prefix of every address on its interfaces,
+     and of a point-to-point link's peer, read with `getifaddrs`, however the
+     address or its route was made (a DHCP client's `proto dhcp` route,
+     `noprefixroute`, a VRF). That is what makes a LAN on public IPv4
+     addresses, or the global IPv6 addresses of a dual-stack LAN (the router,
+     a NAS, the server's 2000::/3 address), local;
    - **the server's hosts**: every address that the repository's host
      resolves to at startup or when a build starts, and every address of the
      host that the worker dials for the worker protocol (`AURCACHE_URL`).
@@ -71,11 +71,10 @@ explicitly. For each address family, in order:
    refusing them would fail their builds (see *Telling a build's own listeners
    apart*).
 
-   *(Follows, in a later PR of this chain.)* Rule 4 matches the
-   destination, so the internet stays reachable through the gateway: an
-   internet destination is in no prefix of the host's addresses. Routes are
-   not read: an IPv4 gateway is in the prefix of an address, and an IPv6 one
-   is link-local, which a fixed range covers.
+   Rule 4 matches the destination, so the internet stays reachable through
+   the gateway: an internet destination is in no prefix of the host's
+   addresses. Routes are not read: an IPv4 gateway is in the prefix of an
+   address, and an IPv6 one is link-local, which a fixed range covers.
 5. Everything else: accept.
 
 The one thing the policy knows about the server is its hosts: the repository's,
@@ -159,12 +158,13 @@ Every address a name resolves to is allowed. Resolution failure of an
 allowlist entry is logged and the entry skipped; the build still runs, and its
 log says which entry was left out.
 
-The server's hosts are resolved at startup as well, and a worker whose
-server's hosts do not resolve then takes no builds. After that, each build
-only adds to the server's sets, which every build shares: a lookup that fails
-or comes back short adds nothing and takes nothing away, so it cannot reopen
-the server to the builds running. The cost is that an address that the
-server's hosts no longer have stays refused until the worker restarts.
+The server's hosts are resolved, and the host's links read, at startup as
+well, which must succeed: a worker that fails at either takes no builds.
+After that, each build only adds to the local sets, which every build shares:
+a lookup or a reading that fails or comes back short adds nothing and takes
+nothing away, so it cannot reopen anything to the builds running. The cost is
+that an address that the server's hosts no longer have, or a prefix that the
+host no longer has, stays refused until the worker restarts.
 
 ## Enforcement on the chroot worker
 
@@ -233,11 +233,14 @@ that run's baseline. The table holds:
 
 - **Static, at startup**, on `builds/`: rules 1, 4 and 5, which need no DNS.
   This is the baseline every build gets, even before its own rules load.
-- **The server's sets**, `server4` and `server6`, with the
-  addresses of the server's hosts: filled at startup, and only added to by
-  each build's transaction. *(Follows, in a later PR of this chain: the
-  prefixes of the host's links go into the same sets, which become `local4`
-  and `local6`.)*
+- **The local sets**, `local4` and `local6` (interval sets that merge what
+  is added to them), with the prefixes of the host's links and the addresses
+  of the server's hosts: filled at startup, and only added to by each
+  build's transaction, which reads the links and resolves the hosts again.
+  A link or an address gone since stays refused until the worker restarts.
+  `nft` works a merge out from its own copy of a set, so the worker makes
+  every change to its table under one lock: two builds starting at once
+  would otherwise delete what the other had already merged.
 - **Per build**, on `build-N`, loaded atomically (`nft -f`) after the cgroup is
   created and before the build starts: rules 2 and 3, with the addresses
   resolved for that build, and rule 4 again, so that the build's own
@@ -368,9 +371,13 @@ It is refused the server's worker protocol and API and another local address,
 reaches the repository and a listener of its own on loopback, and is still
 refused after moving itself to the root of its cgroup namespace and of a
 freshly mounted cgroup2 hierarchy (both moves are reported, and must succeed).
-Addresses routed through a host on a veth link of the worker's, in a network
-namespace of its own, stay reachable. The refusals are reported, and the
-worker process itself reaches all of them. A repository beyond that host, on a
+A host on a veth link of the worker's, in a network namespace of its own, set
+up after the worker started, is refused on its public IPv4 address, its
+global IPv6 address, the peer address of an address of the worker's, and an
+address in a prefix of the worker's that has no kernel route
+(`noprefixroute` with a route of protocol `dhcp`, as dhcpcd makes them),
+while addresses routed through that host stay reachable. The refusals are
+reported, and the worker process itself reaches all of them. A repository beyond that host, on a
 routed address, is reached on its port while another port of its address is
 refused and reported, and another routed address stays reachable; a worker
 protocol on a routed address is refused on every port while the repository is

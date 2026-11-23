@@ -373,8 +373,8 @@ its claims end in `-aurcache-worker-arm64-N`, and its pods carry
 A chroot build runs in its worker pod's network namespace, so package code can
 connect wherever the worker can. The worker puts
 [a network policy](../workers/split-chroot.md#what-builds-can-reach-on-the-network)
-on each build: nothing on a local address -- private, link-local or
-carrier-grade NAT -- unless allowed (the repository is), so the
+on each build: nothing on a local address -- private, link-local, carrier-grade
+NAT, or on the pod's own links -- unless allowed (the repository is), so the
 server's other ports are refused, and the internet open. It matches the
 build's cgroup, so it holds root's connections in the build's container as
 well as the build user's, and leaves the worker process alone. Without it, or

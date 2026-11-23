@@ -950,6 +950,7 @@ dependencies = [
  "hex",
  "ipnet",
  "libc",
+ "nix",
  "percent-encoding",
  "rcgen",
  "reqwest",
