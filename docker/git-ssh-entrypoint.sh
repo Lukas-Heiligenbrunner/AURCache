@@ -40,7 +40,17 @@ git -C "$work/pkg" add -A
 git -C "$work/pkg" commit -qm "packaging"
 git clone -q --bare "$work/pkg" /srv/git/pkg.git
 
-chown -R git:git /srv/git
+# The packaging repo that only SSH reaches: outside the daemon's base path.
+rm -rf /srv/ssh-only
+install -d /srv/ssh-only
+install -d "$work/ssh-source"
+cp /fixture/ssh-source/PKGBUILD "$work/ssh-source/PKGBUILD"
+git init -q -b master "$work/ssh-source"
+git -C "$work/ssh-source" add -A
+git -C "$work/ssh-source" commit -qm "packaging, over SSH only"
+git clone -q --bare "$work/ssh-source" /srv/ssh-only/pkg.git
+
+chown -R git:git /srv/git /srv/ssh-only
 
 /usr/sbin/sshd -e
 # Drop to the repo owner: git refuses to serve a repository owned by another

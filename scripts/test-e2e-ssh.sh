@@ -15,7 +15,7 @@ set -euo pipefail
 # secret committed or configured.
 #
 # Every build is offered the worker's `default` key unless its package's
-# `build_ssh_key` names another. Five phases, in order:
+# `build_ssh_key` names another. Six phases, in order:
 #   1. unauthorised — the worker falls back to its own generated key, which the
 #      server does not authorise. The build MUST fail. Without this the whole
 #      test could pass for the wrong reason (sources cached, fetch skipped, an
@@ -25,15 +25,20 @@ set -euo pipefail
 #      installed package twice, proving both fetches really happened: the
 #      `source=` one on the worker, and the `prepare()` clone inside the
 #      chroot, through the agent's socket bound in there.
-#   3. pinned host — the same key, with `WORKER_SSH_KNOWN_HOSTS` naming the
+#   3. the server's own key — a package whose repository is reachable only
+#      over SSH. The add MUST be refused while the server's generated key is
+#      unknown to the git server, saying so, and succeed once `ssh key`'s
+#      output is authorised; the git server's host key is then trusted on
+#      first use, and logged.
+#   4. pinned host — the same key, with `WORKER_SSH_KNOWN_HOSTS` naming the
 #      server's host key. The build must succeed, both fetches checking the
 #      server against the staged copy: on the worker, and inside the chroot,
 #      where it is bound.
-#   4. unknown host — `WORKER_SSH_KNOWN_HOSTS` names another host only. The
+#   5. unknown host — `WORKER_SSH_KNOWN_HOSTS` names another host only. The
 #      build MUST fail, refused at host-key verification: the host-side fetch
 #      checks the server against the configured list instead of trusting it
 #      on first use.
-#   5. a named key — the default key is generated, so unauthorised, and the
+#   6. a named key — the default key is generated, so unauthorised, and the
 #      accepted one is held as `gitssh` in `WORKER_GIT_SSH_KEYS`. Built on
 #      the default, the fixture MUST fail: it is not offered the `gitssh`
 #      key. (That it cannot reach that agent by its path outside the chroot
@@ -42,7 +47,7 @@ set -euo pipefail
 #      Named `gitssh`, it must succeed.
 #
 # The worker is given the accepted key as a file of its own user's, mode
-# 0600, which a build cannot read: the setup the docs ask for. Before phase 5,
+# 0600, which a build cannot read: the setup the docs ask for. Before phase 6,
 # a stack whose named key is the same key at mode 0644 MUST not start, the
 # worker refusing to with a line naming the file, and warning that a build
 # can read its default key's file, at 0644 too.
@@ -219,7 +224,47 @@ if [ "$found" != "$SSH_TEST_MARKER"$'\n'"$SSH_TEST_MARKER" ]; then
     exit 1
 fi
 
-# ---- Phase 3: a configured known_hosts naming the server must build --------
+# ---- Phase 3: the server clones a package's own source with its key --------
+log "=== Phase: the server's own key (a package source over SSH) ==="
+readonly SSH_SOURCE="ssh://git@gitssh/srv/ssh-only/pkg.git"
+server_key="$(aurcache_cli ssh key | head -n 1)"
+if [[ $server_key != "ssh-ed25519 "* ]]; then
+    log "ERROR: \`ssh key\` printed no key (got: '${server_key:-<nothing>}')"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    server key: $server_key"
+
+if output=$(pkg_add "$SSH_SOURCE" --ref master 2>&1); then
+    log "ERROR: an SSH source was added before the server's key was authorised"
+    dump_logs_on_failure
+    exit 1
+fi
+if [[ $output != *"refused the server's SSH key"* ]]; then
+    printf '%s\n' "$output" | sed 's/^/    /'
+    log "ERROR: the refusal did not say the server's key was refused"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    refused while unauthorised, as required"
+
+printf '%s\n' "$server_key" | dc exec -T gitssh sh -c 'cat >> /home/git/.ssh/authorized_keys'
+if ! output=$(pkg_add "$SSH_SOURCE" --ref master \
+    --wait --wait-timeout "$BUILD_TIMEOUT" 2>&1); then
+    printf '%s\n' "$output" | sed 's/^/    /'
+    log "ERROR: the SSH source did not build once the server's key was authorised"
+    dump_logs_on_failure
+    exit 1
+fi
+# First use is in the activity log, and the journal shows its entries too.
+if ! dc logs aurcache 2>&1 | grep -q "trusted the SSH host key of gitssh on first contact"; then
+    log "ERROR: the server cloned without recording gitssh's host key"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    cloned with the server's key and built"
+
+# ---- Phase 4: a configured known_hosts naming the server must build --------
 run_phase "known_hosts names the server (expect success)" "$WORKER_KEY" "/keys/known_hosts"
 if [ "$phase_result" != "success" ]; then
     log "ERROR: build was '$phase_result' with the server's host key in WORKER_SSH_KNOWN_HOSTS"
@@ -228,7 +273,7 @@ if [ "$phase_result" != "success" ]; then
 fi
 log "    build succeeded against the pinned host key"
 
-# ---- Phase 4: a host the configured known_hosts does not name is refused ----
+# ---- Phase 5: a host that the configured known_hosts omits is refused -------
 run_phase "known_hosts names another host (expect failure)" "$WORKER_KEY" "/keys/known_hosts.other"
 if [ "$phase_result" != "failed" ]; then
     log "ERROR: build was '$phase_result' against a host WORKER_SSH_KNOWN_HOSTS does not name"
@@ -270,7 +315,7 @@ if grep -qF "Worker fingerprint:" <<<"$builder_log"; then
 fi
 log "    the worker refused to start, naming the key file, and warned of the default"
 
-# ---- Phase 5: a named key goes to the package that names it, and only it ---
+# ---- Phase 6: a named key goes to the package that names it, and only it ---
 run_phase "named key, built on the default (expect failure)" "" "" "gitssh:$WORKER_KEY"
 if [ "$phase_result" != "failed" ]; then
     log "ERROR: build was '$phase_result' on the default key, with the authorised key"
