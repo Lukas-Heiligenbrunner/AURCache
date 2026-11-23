@@ -140,8 +140,9 @@ pub(crate) struct RestoreArgs {
     /// package, setting and worker this instance has is removed first.
     #[arg(long)]
     pub(crate) clear: bool,
-    /// Take the dump's CA, worker certificates and token hashes. Replacing
-    /// the CA invalidates every certificate this server's workers hold.
+    /// Take the dump's CA, worker certificates, token hashes and signing key.
+    /// Replacing the CA invalidates every certificate this server's workers
+    /// hold; a replaced signing key signs from the server's next start.
     #[arg(long, value_enum, default_value_t = Secrets::Ignore)]
     pub(crate) secrets: Secrets,
 }

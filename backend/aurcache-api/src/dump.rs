@@ -155,7 +155,7 @@ pub struct RestoreQuery {
     params(RestoreQuery),
     responses(
             (status = 202, description = "Restore started, or for a dry run what it would do", body = RestoreAccepted),
-            (status = 400, description = "Not a dump this server can read, or an unknown policy"),
+            (status = 400, description = "Not a dump this server can read, an unknown policy, or a signing key this server cannot sign with"),
             (status = 413, description = "Larger than any dump this server reads"),
     )
 )]
@@ -194,6 +194,24 @@ pub async fn restore(
     let loaded =
         aurcache_utils::restore::load_dump(&bytes.value).map_err(|e| err(Status::BadRequest, e))?;
     let total = i32::try_from(loaded.packages.len()).unwrap_or(i32::MAX);
+    // A key this server could not sign with is refused before anything is
+    // written, like a dump that cannot be read.
+    let signing_key = aurcache_utils::restore::plan_signing_key(
+        &loaded,
+        &options,
+        &aurcache_signing::KeyConfig::from_env(&ca_dir.0),
+    )
+    .map_err(|e| {
+        let nothing = if options.dry_run {
+            "nothing would be imported"
+        } else {
+            "nothing was imported"
+        };
+        err(Status::BadRequest, format!("{nothing}: {e:#}"))
+    })?;
+    let key_outcome = signing_key
+        .as_ref()
+        .map(aurcache_utils::restore::SigningKeyPlan::outcome);
 
     if options.dry_run {
         let preview = aurcache_utils::restore::preview(&services.db, &loaded, &options).await?;
@@ -201,6 +219,7 @@ pub async fn restore(
             job_id: None,
             total,
             preview,
+            signing_key: key_outcome,
         })));
     }
 
@@ -216,6 +235,7 @@ pub async fn restore(
                 &ca_dir_task.0,
                 loaded,
                 options,
+                signing_key,
                 progress,
             )
             .await;
@@ -233,6 +253,7 @@ pub async fn restore(
         job_id: Some(job_id),
         total,
         preview: Vec::new(),
+        signing_key: key_outcome,
     })))
 }
 

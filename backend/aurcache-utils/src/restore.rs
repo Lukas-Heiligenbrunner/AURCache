@@ -30,19 +30,21 @@ use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
     DumpSecrets, DumpSettings, DumpToken, DumpWorker, ExistingPackagePolicy, MANIFEST_FILE,
     PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome, SETTINGS_FILE,
-    SIGNING_KEY_FILE, SecretsPolicy, TOKENS_FILE, WORKERS_FILE,
+    SIGNING_KEY_FILE, SecretsPolicy, SigningKeyOutcome, TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
 use aurcache_db::packages;
 use aurcache_db::prelude::Packages;
+use aurcache_signing::{KeyConfig, KeyFile};
 use flate2::read::GzDecoder;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::Sender;
 
 use crate::package::source_facts::{SourceFacts, pkg_deps, record_source_names};
-use crate::repository::Repository;
+use crate::repository::{Repository, read_if_there};
 use crate::services::Services;
 use crate::settings::Change;
 use crate::snapshot::SnapshotStore;
@@ -342,6 +344,7 @@ pub async fn apply(
     ca_dir: &std::path::Path,
     dump: LoadedDump,
     options: RestoreOptions,
+    signing_key: Option<SigningKeyPlan>,
     progress: Sender<RestoreEntry>,
 ) {
     let Services {
@@ -376,6 +379,21 @@ pub async fn apply(
                 format!("the packages were imported, but the secrets were not: {e:#}"),
             )
             .await;
+        }
+    }
+    if let Some(SigningKeyPlan::Replace { path, fingerprint }) = signing_key
+        && let Some(key) = dump.secrets.as_ref().and_then(|s| s.signing_key.as_deref())
+    {
+        match replace_signing_key(&path, key) {
+            Ok(()) => services
+                .activity
+                .emit(Event::RestoreSigningKeyReplaced { fingerprint }),
+            Err(e) => {
+                let error = format!(
+                    "the packages were imported, but writing the signing key failed: {e:#}"
+                );
+                report_failure(&progress, "", error).await;
+            }
         }
     }
 
@@ -512,6 +530,86 @@ fn write_secrets(
         secrets.ca_key_pem.clone(),
     )?;
     Ok(true)
+}
+
+/// What a restore does with the dump's signing key, decided by
+/// [`plan_signing_key`] before anything is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SigningKeyPlan {
+    /// Write the dump's key, whose primary key is `fingerprint`, at `path`
+    /// once the rows commit.
+    Replace { path: PathBuf, fingerprint: String },
+    /// The key file at the server's path already holds exactly the dump's.
+    Unchanged,
+    /// The server signs with a supplied key, which a restore never writes.
+    KeptSupplied,
+}
+
+impl SigningKeyPlan {
+    #[must_use]
+    pub const fn outcome(&self) -> SigningKeyOutcome {
+        match self {
+            Self::Replace { .. } => SigningKeyOutcome::Replaced,
+            Self::Unchanged => SigningKeyOutcome::Unchanged,
+            Self::KeptSupplied => SigningKeyOutcome::KeptSupplied,
+        }
+    }
+}
+
+/// What this restore will do with the dump's signing key, or `None` when it
+/// carries none or its secrets are not taken.
+///
+/// Refused unless the key is one this server could sign with: it parses,
+/// unlocks with this server's passphrase (or needs none), has not expired and
+/// signs. Checked before anything is written, so a refusal imports nothing.
+pub fn plan_signing_key(
+    dump: &LoadedDump,
+    options: &RestoreOptions,
+    config: &KeyConfig,
+) -> anyhow::Result<Option<SigningKeyPlan>> {
+    let Some(key) = dump.secrets.as_ref().and_then(|s| s.signing_key.as_deref()) else {
+        return Ok(None);
+    };
+    if !take_secrets(options) {
+        return Ok(None);
+    }
+    let path = match &config.key {
+        KeyFile::Supplied(_) => return Ok(Some(SigningKeyPlan::KeptSupplied)),
+        KeyFile::Own(path) => path,
+    };
+    if read_if_there(path)?.as_deref() == Some(key) {
+        return Ok(Some(SigningKeyPlan::Unchanged));
+    }
+    let passphrase = config.passphrase()?;
+    let checked =
+        aurcache_signing::InstanceKey::parse(key, passphrase.as_deref()).map_err(|e| {
+            e.context(format!(
+                "the dump's signing key ({SIGNING_KEY_FILE}) cannot sign here"
+            ))
+        })?;
+    Ok(Some(SigningKeyPlan::Replace {
+        path: path.clone(),
+        fingerprint: checked.fingerprint().to_string(),
+    }))
+}
+
+/// The old file is kept beside the new one under a hash of its bytes, so a
+/// name always means one content and no copy overwrites a different one.
+fn replace_signing_key(path: &Path, key: &[u8]) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use aurcache_common::fs::write_private;
+
+    if let Some(old) = read_if_there(path)? {
+        let mut kept = path.as_os_str().to_owned();
+        kept.push(format!(
+            ".replaced-{}",
+            &aurcache_common::digest::sha256_hex(&old)[..16]
+        ));
+        let kept = PathBuf::from(kept);
+        write_private(&kept, &old)
+            .with_context(|| format!("keeping the old key as {}", kept.display()))?;
+    }
+    write_private(path, key).with_context(|| format!("replacing {}", path.display()))
 }
 
 /// What pass 1 did.

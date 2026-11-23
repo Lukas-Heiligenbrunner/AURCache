@@ -345,6 +345,51 @@ pub struct RestoreAccepted {
     /// Populated only for a dry run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<RestoreEntry>,
+    /// What the import does, or would do, with the dump's signing key: `None`
+    /// when it carries none or its secrets are not taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_key: Option<SigningKeyOutcome>,
+}
+
+/// What an import does with the signing key a dump carries, decided before
+/// anything is written.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SigningKeyOutcome {
+    /// Written over this server's own key file once the rows commit. The
+    /// server signs with it from its next start with signing on.
+    Replaced,
+    /// This server's key file already holds exactly the dump's.
+    Unchanged,
+    /// This server signs with a key supplied with `AURCACHE_SIGNING_KEY_FILE`,
+    /// which an import never writes.
+    KeptSupplied,
+}
+
+impl SigningKeyOutcome {
+    /// The report's line about the key, as the CLI and the web UI show it.
+    #[must_use]
+    pub const fn line(self, dry_run: bool) -> &'static str {
+        match (self, dry_run) {
+            (Self::Replaced, false) => {
+                "Signing key: will be replaced once the packages are imported; a failure to \
+                 write it shows in the restore's progress. The server signs with it from \
+                 its next start with signing on, and clients must trust it then: see the \
+                 pacman-key steps under \"Signing the repository\" in the docs."
+            }
+            (Self::Replaced, true) => {
+                "Signing key: would be replaced. The server would sign with it from its next \
+                 start with signing on, and clients would have to trust it then: see the \
+                 pacman-key steps under \"Signing the repository\" in the docs."
+            }
+            (Self::Unchanged, _) => "Signing key: unchanged; this server's is already the dump's.",
+            (Self::KeptSupplied, _) => {
+                "Signing key: kept (supplied). This server signs with \
+                 AURCACHE_SIGNING_KEY_FILE, which a restore never writes."
+            }
+        }
+    }
 }
 
 #[cfg(test)]

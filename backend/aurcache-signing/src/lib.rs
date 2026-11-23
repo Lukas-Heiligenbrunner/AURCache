@@ -12,9 +12,9 @@
 //! supported. One that stops signing within [`EXPIRY_WARNING_DAYS`] loads,
 //! and says so ([`InstanceKey::expiring`]).
 //!
-//! The key is a file, like the worker CA's, never a database row: the
-//! database is what gets exported, backed up elsewhere and inspected. Nothing
-//! here hands the secret key out, and its `Debug` shows the fingerprint only.
+//! The key is a file, like the worker CA's, never a database row. Nothing
+//! here hands the secret key out, and its `Debug` shows the fingerprint only:
+//! a dump taken with secrets carries the file as stored.
 
 use anyhow::{Context, anyhow, bail};
 use aurcache_common::fs::REPO_ROOT;
@@ -276,16 +276,20 @@ impl InstanceKey {
     pub fn load(path: &Path, passphrase: Option<&str>) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading the signing key {}", path.display()))?;
-        let key = parse_secret(&bytes)
-            .with_context(|| format!("reading the signing key {}", path.display()))?;
+        Self::parse(&bytes, passphrase)
+            .with_context(|| format!("using the signing key {}", path.display()))
+    }
+
+    /// The key in `bytes`, armored or binary, unlocked with `passphrase`, and
+    /// refused as [`Self::load`] refuses it.
+    pub fn parse(bytes: &[u8], passphrase: Option<&str>) -> anyhow::Result<Self> {
+        let key = parse_secret(bytes)?;
         if passphrase.is_some() && !key.primary_key.secret_params().is_encrypted() {
             tracing::warn!(
-                "the signing key {} is not protected by a passphrase; the one configured is not used to unlock it",
-                path.display()
+                "the signing key is not protected by a passphrase; the one configured is not used to unlock it"
             );
         }
         Self::new(key, passphrase.map_or_else(Password::empty, Password::from))
-            .with_context(|| format!("using the signing key {}", path.display()))
     }
 
     /// The key in `path`, or a new one written there (owner-only) when there
