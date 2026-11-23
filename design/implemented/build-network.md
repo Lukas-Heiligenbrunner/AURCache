@@ -118,15 +118,16 @@ The allowlist is the union of:
 
 | Source | Applies to | Example |
 |---|---|---|
-| Server, global setting `build_hosts` (`BUILD_HOSTS` env, settings page) | every build | `distcc.lan:3632,flexo.lan:7878` |
-| Server, package setting `build_hosts` | that package's builds, **added to** the global list | `gitlab.lan:22` |
-| Derived: the `Server =` lines of the build's `pacman.conf`, including the server-supplied mirrorlist | every build | the AURCache repository, a LAN mirror |
-| Worker, optional `WORKER_BUILD_ALLOW` (*follows, in a later PR of this chain*) | every build on that worker | a worker on a different LAN with its own distcc helpers |
+| Server: global `build_hosts` (`BUILD_HOSTS`, settings page) | every build | `distcc.lan:3632` |
+| Server: package `build_hosts` | its builds, **added to** the global list | `gitlab.lan:22` |
+| The `Server =` lines of the build's `pacman.conf` and mirrorlist | every build | the repository |
+| Worker: `WORKER_BUILD_ALLOW` | that worker's builds | its own distcc helpers |
 
-Entries are `host:port`, with the host a name or an address (IPv6 in brackets).
+Entries are `host:port`, with the host a name or an address (IPv6 in brackets,
+without a zone: the rules match an address, not an interface). An entry
+opens its port to TCP and UDP alike.
 
-The worker's policy takes the derived entries; `WORKER_BUILD_ALLOW` follows, in
-a later PR of this chain. The
+The worker's policy takes the derived entries and `WORKER_BUILD_ALLOW`. The
 server's `build_hosts` setting, with the `JobDescriptor` field below that
 carries it, is implemented separately, by #456, which follows it; until then
 the two `build_hosts` rows above, the resolution rule and the protocol change
@@ -341,8 +342,9 @@ a local address stays refused.
 Every refusal in a build's own rules (by cgroup) is added to a dynamic set of
 that build's (`address . protocol . port`, at most 1024), in a rule of its own
 so a full set never stops the refusal. When the build ends, the worker lists the
-set, removes the rules, and appends to the build's log what was refused. No
-kernel log is involved, so nothing needs reading `dmesg`.
+set, removes the rules, and appends to the build's log what was refused, with a
+pointer to `WORKER_BUILD_ALLOW`. No kernel log is involved, so nothing needs
+reading `dmesg`.
 
 ### Failure
 

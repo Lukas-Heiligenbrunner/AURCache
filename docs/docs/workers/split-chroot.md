@@ -579,7 +579,7 @@ connection a build makes, in this order:
 1. DNS to the resolvers in the worker's `/etc/resolv.conf` is allowed.
 2. **The allowlist is allowed**, exact `host:port` pairs: the hosts named by
    the `Server =` lines of the build's `pacman.conf` (AURCache's repository, a
-   LAN mirror, the mirrorlist that AURCache sends).
+   LAN mirror, the mirrorlist that AURCache sends), and `WORKER_BUILD_ALLOW`.
 3. **Local destinations are refused**:
    - loopback, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
      `169.254.0.0/16`, `100.64.0.0/10`, `240.0.0.0/4`, `fc00::/7`,
@@ -602,12 +602,15 @@ connection a build makes, in this order:
 4. Everything else -- the AUR, source hosts, the official mirrors, the rest of
    the internet -- is allowed.
 
-So on the server's hosts, and anywhere on your network, the worker protocol
-and the web UI and API are refused on whatever port they are published, along
-with everything else on that machine but the repository. The allowlist opens
-an address and port, not a name: everything served there is reachable through
-it, every virtual host of a reverse proxy on that port included, so an API
-behind the same proxy and port as the repository is reachable (see below).
+So on the server's hosts, and anywhere on your network, the worker protocol and
+the web UI and API are refused on whatever port they are published, along with
+everything else on that machine but the repository. Another service there -- a
+GitLab beside AURCache on the same NAS, say -- is opened by allowing exactly its
+`host:port`: `truenas.lan:30080` opens that port and no other, to TCP and UDP
+alike. An entry opens an address and port, not a name: everything served there
+is reachable through it, every virtual host of a reverse proxy on that port
+included. That holds for the repository too, so an API behind the same proxy and
+port as the repository is reachable (see below).
 
 A refusal is a TCP reset or an ICMP error, so the build fails at once rather
 than timing out, and the build's log ends with the destinations it was
@@ -615,7 +618,7 @@ refused and why:
 
 ```text
 [worker] the build network policy refused connections to:
-[worker]   192.168.1.20:3632/tcp: a local address
+[worker]   192.168.1.20:3632/tcp: a local address; if the build needs it, the worker's WORKER_BUILD_ALLOW can allow it (host:port)
 ```
 
 Names are resolved, and the worker's links read, when each build starts, so
@@ -672,9 +675,10 @@ allows; `iptables -S OUTPUT` (and `ip6tables -S OUTPUT`) show it, and
 
 | Variable | Type | Description | Default |
 |---|---|---|---|
+| `WORKER_BUILD_ALLOW` | List | Local destinations that every build on this worker may reach, TCP and UDP, as `host:port` separated by commas (an IPv6 address in brackets: `[fd00::5]:3632`; a link-local one with a zone, `[fe80::1%eth0]:22`, is refused) | none |
 | `WORKER_BUILD_FIREWALL` | Boolean | `0` puts no network policy on builds | on |
 
-It is this machine's alone; AURCache cannot set it.
+Both are this machine's alone; AURCache cannot set them.
 
 What the policy does not cover:
 
@@ -718,9 +722,10 @@ What the policy does not cover:
   the worker's table: running builds go unrestricted, and new ones fail until
   you restart the worker.
 
-A build that needs a [distcc](https://www.distcc.org/) helper, a git server or
-a cache on your network is refused it for now: nothing but the build's
-`pacman.conf` adds to the allowlist yet.
+If a build needs a [distcc](https://www.distcc.org/) helper, a git server or a
+cache on your network, add it to `WORKER_BUILD_ALLOW`. A distccd that builds
+reach runs any build's compilers, so make its helpers dedicated machines, with
+`--allow` set to the workers.
 
 The [Docker worker](./docker.md#what-builds-can-reach-on-the-network) has no
 such policy yet.

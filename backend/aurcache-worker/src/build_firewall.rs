@@ -14,7 +14,7 @@
 //! 1. established and related traffic: accepted;
 //! 2. DNS to the resolvers in the worker's `resolv.conf`: accepted;
 //! 3. the allowlist, exact `host:port` pairs (the `Server =` lines of the
-//!    build's `pacman.conf`): accepted;
+//!    build's `pacman.conf`, `WORKER_BUILD_ALLOW`): accepted;
 //! 4. local destinations ([`local`]: fixed ranges and the worker's links),
 //!    every address of the worker host, and every address of the server's
 //!    hosts: refused, except a listener of the same build;
@@ -685,6 +685,9 @@ fn server_addrs(server: &ServerHosts) -> Result<Vec<IpAddr>> {
 /// What a build's policy is made from, besides the server's hosts, before any
 /// name is resolved.
 pub struct Inputs {
+    /// Local destinations that every build on this worker may reach
+    /// (`WORKER_BUILD_ALLOW`).
+    pub allow: Vec<Endpoint>,
     /// The `pacman.conf` the build syncs and installs with.
     pub pacman_conf: PathBuf,
     /// The mirrorlist the server sent for the build, if any.
@@ -750,7 +753,7 @@ fn resolve(server: &ServerHosts, inputs: &Inputs) -> Result<Resolved> {
         servers.extend(mirrors(list).servers);
     }
     let mut entries: Vec<Endpoint> = Vec::new();
-    for server in servers {
+    for server in servers.into_iter().chain(inputs.allow.iter().cloned()) {
         if !entries.contains(&server) {
             entries.push(server);
         }
@@ -1194,7 +1197,10 @@ impl Drop for BuildRules {
 
 /// A refusal as the build's log says it.
 fn explain(refusal: &Refusal) -> String {
-    format!("{refusal}: a local address")
+    format!(
+        "{refusal}: a local address; if the build needs it, the worker's \
+         WORKER_BUILD_ALLOW can allow it (host:port)"
+    )
 }
 
 #[cfg(test)]
@@ -1468,6 +1474,7 @@ mod tests {
         let conf = format!("[options]\n\n[aurcache]\nServer = http://{repo}/$arch\n");
         std::fs::write(&pacman_conf, conf).unwrap();
         Inputs {
+            allow: Vec::new(),
             pacman_conf,
             mirrorlist: None,
         }
@@ -1683,12 +1690,16 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_says_why() {
+    fn a_refusal_says_how_to_allow_it() {
         let refusal = Refusal {
             addr: ip("192.168.1.9"),
             protocol: "tcp".to_string(),
             port: 3632,
         };
-        assert_eq!(explain(&refusal), "192.168.1.9:3632/tcp: a local address");
+        assert_eq!(
+            explain(&refusal),
+            "192.168.1.9:3632/tcp: a local address; if the build needs it, the \
+             worker's WORKER_BUILD_ALLOW can allow it (host:port)"
+        );
     }
 }
