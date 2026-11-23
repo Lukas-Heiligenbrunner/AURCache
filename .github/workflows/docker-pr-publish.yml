@@ -1,0 +1,122 @@
+name: Publish PR Docker Images
+
+# Runs with a push token: takes only the artifact from the build, never PR
+# code. See design/implemented/pr-images.md.
+on:
+  workflow_run:
+    workflows: [Build PR Docker Images]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'pull_request'
+    # Its image ships skopeo.
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # the build run and its artifact
+      pull-requests: read # the PR, its head and its labels
+      packages: write # the push
+    steps:
+      # Publishes only a build of the head commit of an open, labelled PR
+      # against master, read from the API now rather than from the build.
+      - name: Find the PR's build
+        id: build
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          LABEL: preview-image
+          ARTIFACT: server-image
+        with:
+          script: |
+            const { LABEL, ARTIFACT } = process.env;
+            const { owner, repo } = context.repo;
+            const skip = message => {
+              core.notice(message);
+              core.setOutput('publish', 'false');
+            };
+
+            // A fork's run lists no pull requests: find the PR by its head.
+            const trigger = context.payload.workflow_run;
+            const head = trigger.head_repository;
+            if (!head) {
+              return skip(`Run ${trigger.id}'s head repository no longer exists`);
+            }
+            const prs = (await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open', base: 'master',
+              head: `${head.owner.login}:${trigger.head_branch}`, per_page: 100
+            })).filter(pr =>
+              pr.head.repo?.full_name === head.full_name &&
+              pr.head.ref === trigger.head_branch);
+            if (prs.length !== 1) {
+              return skip('No unique open PR for this build');
+            }
+            const pr = prs[0];
+            if (pr.head.sha !== trigger.head_sha) {
+              return skip(`PR #${pr.number} has moved on from ${trigger.head_sha}`);
+            }
+            if (!pr.labels.some(label => label.name === LABEL)) {
+              return skip(`PR #${pr.number} is not labelled ${LABEL}; ` +
+                're-run its build once it is');
+            }
+
+            // Each attempt of a run uploads an artifact of its own: the
+            // newest is the latest attempt's.
+            const artifacts = (await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              owner, repo, run_id: trigger.id, name: ARTIFACT, per_page: 100
+            })).filter(artifact => artifact.name === ARTIFACT && !artifact.expired);
+            if (artifacts.length === 0) {
+              return skip(`Run ${trigger.id} has no unexpired ${ARTIFACT} artifact`);
+            }
+            const artifact = artifacts.reduce((a, b) => b.id > a.id ? b : a);
+
+            core.setOutput('publish', 'true');
+            core.setOutput('artifact', String(artifact.id));
+            core.setOutput('image', `ghcr.io/${owner}/${repo}-preview`.toLowerCase());
+            core.setOutput('tag', `pr-${pr.number}-${trigger.head_sha}`);
+            core.setOutput('latest', `pr-${pr.number}`);
+
+      - name: Download the build's image
+        if: steps.build.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          artifact-ids: ${{ steps.build.outputs.artifact }}
+          path: ${{ runner.temp }}/image
+
+      # skopeo follows a symlink out of the layout (a future extractor might
+      # write one) and fetches the URLs that a descriptor lists: the dead
+      # proxy fails every host but GHCR's. See design/implemented/pr-images.md.
+      - name: Push the image to the preview package
+        if: steps.build.outputs.publish == 'true'
+        shell: bash
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.repository_owner }}
+          LAYOUT: ${{ runner.temp }}/image
+          IMAGE: ${{ steps.build.outputs.image }}
+          TAG: ${{ steps.build.outputs.tag }}
+          LATEST: ${{ steps.build.outputs.latest }}
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: ghcr.io,pkg-containers.githubusercontent.com
+        run: |
+          if [[ -n $(find "$LAYOUT" ! -type f ! -type d -print -quit) ]]; then
+            echo "::error::The image layout holds symlinks or special files"
+            exit 1
+          fi
+          auth=$RUNNER_TEMP/registry-auth.json
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" \
+            --username "$REGISTRY_USER" --password-stdin ghcr.io
+          skopeo copy --all --preserve-digests --authfile "$auth" \
+            --digestfile "$RUNNER_TEMP/digest" "oci:$LAYOUT" "docker://$IMAGE:$TAG"
+          skopeo copy --all --preserve-digests --authfile "$auth" \
+            "docker://$IMAGE@$(<"$RUNNER_TEMP/digest")" "docker://$IMAGE:$LATEST"
+          {
+            echo "Preview image: \`$IMAGE:$TAG\` (also \`$IMAGE:$LATEST\`)"
+            echo
+            echo "Digest: \`$(cat "$RUNNER_TEMP/digest")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
