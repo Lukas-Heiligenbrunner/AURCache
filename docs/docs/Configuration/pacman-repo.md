@@ -177,7 +177,8 @@ attempt; rebuilding one publishes it again, signed:
 
 It is kept as `signing-key.asc` in the CA directory (`AURCACHE_CA_DIR`,
 `./data/ca` by default), readable by the server's user only. Back it up with
-the CA: losing it means a new key, which every client has to trust again.
+the CA, or in a dump with secrets: losing it means a new key, which every
+client has to trust again.
 
 :::warning Keep the key out of the repository directory
 A container whose only volume is the repository, as a 0.5 compose file has
@@ -239,9 +240,12 @@ elsewhere with `AURCACHE_SIGNING_KEY_FILE`.
   from whoever does not also have the passphrase file. It cannot protect the
   key from someone who can read both, which the server has to do to sign at
   all.
-- A [dump](../cli/maintenance.md), even one taken with secrets, never carries the
-  key: a client that trusts it installs whatever it signs, from wherever, long
-  after the instance a dump came from is gone. Copy the file on purpose.
+- A [dump taken with secrets](../cli/maintenance.md) carries the key file as
+  stored — locked if it is, never with its passphrase — and a restore that
+  takes secrets puts it in place, keeping the old file beside it. The server
+  signs with it from its next start; clients that do not trust it yet must
+  then, as above. A supplied key is never replaced. Keep such a dump as you
+  would the key: a client that trusts it installs whatever it signs.
 - The public key is served without authentication at `GET /api/repo/key`.
   Publishing it on a keyserver is your call, and cannot be undone:
   `curl -fsSL …/api/repo/key | gpg --import` then
