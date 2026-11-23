@@ -98,7 +98,6 @@ mod tests {
     use crate::agent::build::dirs::Owner;
     use aurcache_build_agent::layout::Work;
     use aurcache_build_agent::report::{BuildReport, Ended};
-    use aurcache_build_agent::spec::INTERFACE;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     fn own() -> Owner {
@@ -110,10 +109,7 @@ mod tests {
     }
 
     fn report() -> BuildReport {
-        BuildReport {
-            interface: INTERFACE,
-            ended: Ended::Exited { code: 0 },
-        }
+        BuildReport::unmeasured(Ended::Exited { code: 0 })
     }
 
     #[test]

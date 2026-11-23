@@ -59,6 +59,9 @@ built before still build, but some things change:
 - **`BUILD_ARTIFACT_DIR` must allow executing.** The agent is run from the
   build directory, so one on a filesystem mounted `noexec` fails every build
   as its container starts.
+- **Builds report what they used.** Each build reports its disk use, its VCS
+  commits and, where the engine's cgroup allows it, its peak memory. An
+  out-of-memory failure says so and names `MEMORY_LIMIT`.
 - **`/dev/shm` follows the memory limit.** It is as large as `MEMORY_LIMIT`, or
   2 GiB when no limit is set, where Docker's default is 64 MiB.
 - **A custom `BUILDER_IMAGE`** needs pacman, makepkg, gpg and `find`. It no longer needs

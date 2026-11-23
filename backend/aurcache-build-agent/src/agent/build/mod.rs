@@ -15,8 +15,8 @@
 //!    it names ([`deps`]);
 //! 4. as the build user, for good: makepkg, which has nothing in the
 //!    container to ask root for anything;
-//! 5. as root again, once every other process is dead: write the report,
-//!    hand the directory back.
+//! 5. as root again, once every other process is dead: measure, write the
+//!    report, hand the directory back.
 
 mod children;
 mod deps;
@@ -25,9 +25,11 @@ mod handback;
 mod init;
 mod keys;
 mod makepkg;
+mod measure;
 mod run;
 mod source;
 mod user;
+mod vcs;
 
 use aurcache_build_agent::layout::{Scratch, Work};
 use aurcache_build_agent::makepkg_conf::{self, Rendering};
@@ -35,6 +37,7 @@ use aurcache_build_agent::report::{BuildReport, Ended, SetupStep};
 use aurcache_build_agent::spec::{BuildSpec, INTERFACE};
 use children::Quiet;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Component, Path};
 use std::process::{Command, ExitCode, ExitStatus};
 use std::time::Duration;
@@ -66,6 +69,12 @@ fn at<E: ToString>(step: SetupStep) -> impl Fn(E) -> Failed {
     }
 }
 
+/// A build whose makepkg ran.
+struct Made {
+    status: ExitStatus,
+    user: BuildUser,
+}
+
 /// Run the build in `work`, as PID 1 and root. Exits 0 if and only if it
 /// wrote `<work>/out/report.json`.
 pub fn run(work: &Path) -> ExitCode {
@@ -94,24 +103,43 @@ fn build(work: &Work) -> Result<(), String> {
     }
     let owner = dirs::take(work).map_err(|e| format!("taking {}: {e}", work.root().display()))?;
 
-    let made = read_spec(work)
-        .map_err(|message| Failed {
+    let spec = read_spec(work);
+    let made = match &spec {
+        Ok(spec) => make(spec, work),
+        Err(message) => Err(Failed {
             step: SetupStep::Spec,
-            message,
-        })
-        .and_then(|spec| make(&spec, work));
+            message: message.clone(),
+        }),
+    };
     clear("the build")?;
+    let vcs_commits = if let Ok(spec) = &spec
+        && let Ok(made) = &made
+    {
+        let commits = vcs::commits(&spec.vcs_sources, &Scratch::new(&spec.scratch), &made.user);
+        clear("git")?;
+        commits
+    } else {
+        BTreeMap::new()
+    };
     let ended = match made {
-        Ok(status) => makepkg::ended(status),
+        Ok(made) => makepkg::ended(made.status),
         Err(Failed { step, message }) => {
             run::say(&format!("the build could not start: {message}"));
             Ended::Setup { step, message }
         }
     };
 
+    let memory = measure::memory();
     let report = BuildReport {
         interface: INTERFACE,
         ended,
+        peak_memory_bytes: memory.peak_bytes,
+        oom_kills: memory.oom_kills,
+        disk_bytes: spec
+            .as_ref()
+            .ok()
+            .and_then(|spec| measure::disk(work.root(), &spec.scratch)),
+        vcs_commits,
     };
     handback::write(work, &report).map_err(|e| format!("writing the report: {e}"))?;
     handback::give(work, owner);
@@ -161,14 +189,15 @@ fn read_spec(work: &Work) -> Result<BuildSpec, String> {
     Ok(spec)
 }
 
-/// Whether a package base can be a directory's name.
-fn is_one_name(pkgbase: &str) -> bool {
-    let mut parts = Path::new(pkgbase).components();
+/// Whether `name` is one path component, as a package base and a VCS
+/// mirror's directory under `SRCDEST` must be.
+fn is_one_name(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
     matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
 }
 
 /// Everything from the spec to makepkg's end.
-fn make(spec: &BuildSpec, work: &Work) -> Result<ExitStatus, Failed> {
+fn make(spec: &BuildSpec, work: &Work) -> Result<Made, Failed> {
     let root = spec.scratch.as_path();
     let scratch = Scratch::new(root);
 
@@ -209,7 +238,8 @@ fn make(spec: &BuildSpec, work: &Work) -> Result<ExitStatus, Failed> {
     deps::install(&needs, &user).map_err(at(SetupStep::Dependencies))?;
 
     run::say("running makepkg");
-    makepkg::run(&place, &spec.build_flags, &user).map_err(at(SetupStep::Makepkg))
+    let status = makepkg::run(&place, &spec.build_flags, &user).map_err(at(SetupStep::Makepkg))?;
+    Ok(Made { status, user })
 }
 
 /// Write the job's pacman configuration into `/etc`: the whole of it as

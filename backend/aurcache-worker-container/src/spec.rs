@@ -51,6 +51,7 @@ fn describe(
         mirrorlist: mirrorlist.map(str::to_string),
         pgp_keys: job.pgp_keys.clone(),
         keyserver: options.keyserver,
+        vcs_sources: job.vcs_sources.clone(),
         cpus: options.cpus,
         scratch: options.scratch,
     }
@@ -59,7 +60,7 @@ fn describe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurcache_common::worker::MirrorlistOffer;
+    use aurcache_common::worker::{JobVcsSource, MirrorlistOffer};
 
     fn job() -> JobDescriptor {
         JobDescriptor {
@@ -72,7 +73,11 @@ mod tests {
             pacman_conf: "[options]\nArchitecture = auto".into(),
             mirrorlist: MirrorlistOffer::Nothing,
             pgp_keys: vec!["ABCD".into()],
-            vcs_sources: vec![],
+            vcs_sources: vec![JobVcsSource {
+                source_url: "git+https://example.org/x.git#branch=main".into(),
+                dir: "x".into(),
+                git_ref: "main".into(),
+            }],
             expected_packages: vec!["hello".into()],
             timeout_secs: None,
             expected_version: String::new(),
@@ -103,6 +108,7 @@ mod tests {
         assert_eq!(spec.makepkg_conf, job.makepkg_conf);
         assert_eq!(spec.mirrorlist.as_deref(), Some("Server = https://m/$repo"));
         assert_eq!(spec.pgp_keys, job.pgp_keys);
+        assert_eq!(spec.vcs_sources, job.vcs_sources);
     }
 
     #[test]

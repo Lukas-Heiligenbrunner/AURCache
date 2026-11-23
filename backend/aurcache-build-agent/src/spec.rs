@@ -4,6 +4,7 @@
 //! anything else. Within one [`INTERFACE`] these types only gain optional
 //! fields; anything else is the next interface.
 
+use aurcache_common::worker::JobVcsSource;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -33,6 +34,9 @@ pub struct BuildSpec {
     pub mirrorlist: Option<String>,
     pub pgp_keys: Vec<String>,
     pub keyserver: String,
+    /// The job's VCS sources, whose commits the report gives.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vcs_sources: Vec<JobVcsSource>,
     /// The CPUs the build is limited to, which size its parallelism.
     pub cpus: Option<f64>,
     /// Where the build's own trees go, inside the container.

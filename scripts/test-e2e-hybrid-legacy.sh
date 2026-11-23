@@ -30,8 +30,6 @@ mkdir -p "$E2E_BUILD_DIR"
 
 export E2E_COMPOSE_FILE="${E2E_COMPOSE_FILE:-$PROJECT_DIR/compose/docker-compose.e2e-hybrid-legacy.yaml}"
 export E2E_SERVICES="aurcache"
-# The container builder has no storage pool, so its builds report no disk use.
-export E2E_EXPECT_DISK_USAGE=0
 # The Docker worker's builds have no network policy yet.
 export E2E_CHECK_BUILD_FIREWALL=0
 
