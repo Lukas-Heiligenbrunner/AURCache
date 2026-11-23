@@ -965,6 +965,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurcache-worker-container"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aurcache-build-agent",
+ "aurcache-common",
+ "aurcache-worker-core",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "aurcache-worker-core"
 version = "0.1.0"
 dependencies = [
@@ -1007,10 +1020,13 @@ name = "aurcache-worker-docker"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "aurcache-build-agent",
  "aurcache-common",
+ "aurcache-worker-container",
  "aurcache-worker-core",
  "bollard",
  "futures",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

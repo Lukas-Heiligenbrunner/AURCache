@@ -1,0 +1,24 @@
+[package]
+name = "aurcache-worker-container"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The worker's side of a build the agent runs in a container: what a worker
+# needs for it whatever engine its containers come from. Not
+# part of aurcache-worker-core, so the chroot worker links none of it, and not
+# part of the agent, which stays free of a worker's dependencies.
+
+[lints]
+workspace = true
+
+[dependencies]
+aurcache-common = { path = "../aurcache-common" }
+aurcache-worker-core = { path = "../aurcache-worker-core" }
+aurcache-build-agent = { path = "../aurcache-build-agent" }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

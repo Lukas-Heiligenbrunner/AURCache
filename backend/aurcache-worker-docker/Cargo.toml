@@ -5,8 +5,8 @@ edition = "2024"
 license.workspace = true
 publish = false
 
-# The Docker worker: a container per build. Its own crate, so the chroot
-# worker never links a Docker client.
+# The Docker worker: a container per build, run by the build agent. Its own
+# crate, so the chroot worker never links a Docker client.
 
 [[bin]]
 name = "aurcache-worker-docker"
@@ -23,6 +23,9 @@ futures = "0.3"
 bollard = "0.21"
 aurcache-common = { path = "../aurcache-common" }
 aurcache-worker-core = { path = "../aurcache-worker-core" }
+aurcache-worker-container = { path = "../aurcache-worker-container" }
+aurcache-build-agent = { path = "../aurcache-build-agent" }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
