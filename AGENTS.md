@@ -43,6 +43,7 @@ just test          # cargo test, both workspaces (no browser)
 just test-browser  # scripts/test-frontend.sh
 just test-kernel   # scripts/test-kernel.sh (docker, privileged)
 just test-signed-repo  # scripts/test-signed-repo.sh (docker, pacman checks signing)
+just test-agent    # scripts/test-build-agent.sh (docker)
 just clean
 
 # Rust backend workspace
@@ -78,6 +79,10 @@ cd docs && yarn install --frozen-lockfile && yarn build
 # end-to-end smoke test
 ./scripts/test-e2e.sh hello
 
+# the build agent, static, running builds in the builder image under a build
+# container's flags (docker, ~3 min; needs python3 and git)
+./scripts/test-build-agent.sh
+
 # build the Arch packages from this tree (and optionally install them)
 ./scripts/build-packages.sh --install
 ./scripts/build-packages.sh --packages aurcache-server
@@ -101,12 +106,18 @@ cd docs && yarn install --frozen-lockfile && yarn build
 is what CI runs nightly. Reach for the others only when a change touches what
 they cover, rather than running all of them as a matter of course:
 
+- `test-build-agent.sh` (`just test-agent`) — for changes to
+  `aurcache-build-agent`: the agent built static, running a real build and a
+  hostile one in the builder image with the capabilities and flags a build
+  container gets. Docker only.
 - `test-e2e-hybrid.sh` — for changes to the hybrid image itself (its
   entrypoint, the embedded worker's loopback enrollment, the Podman it runs in
-  DinD mode) or to the Docker worker, which is its only builder.
+  DinD mode), to the Docker worker, which is its only builder, or to what
+  that worker builds with (`aurcache-worker-container`, the agent).
 - `test-e2e-hybrid-legacy.sh` — the same image in host mode, against the
   host's Docker socket: for changes to how the builder shares its build
-  directory with a daemon outside the container.
+  directory with a daemon outside the container. `E2E_BUILD_DIR` names that
+  directory, which is under `/tmp` otherwise.
 - `test-sandbox.sh` — only for changes to `aurcache-sandbox`, the PKGBUILD
   sourcing path, or how the patched makechrootpkg upgrades a build's system.
 - `test-signed-repo.sh` — for changes to signing (`aurcache-signing`, or how
@@ -120,10 +131,12 @@ they cover, rather than running all of them as a matter of course:
   local storage: root in the container cannot write to a root-squashed NFS.
 
 CI runs the lint and unit tests for both workspaces, `test-frontend.sh`,
-`test-kernel.sh`, `test-sandbox.sh` and `test-signed-repo.sh` on every push;
-`test-e2e.sh` runs nightly instead, and only when something landed that day. It cannot cover a
-pool on a block device or zvol, or an image on ZFS; the runner has neither.
-Add the `run-e2e` label to a pull request to run the e2e suite there on demand.
+`test-kernel.sh`, `test-sandbox.sh`, `test-signed-repo.sh` and
+`test-build-agent.sh` on every push; `test-e2e.sh` runs nightly instead, and
+only when something landed that day. The nightly cannot cover a pool on a
+block device or zvol, or an image on ZFS; the runner has neither. Add the
+`run-e2e` label to a pull request to run the e2e suite there on demand.
+Neither hybrid suite runs in CI.
 
 Unit and integration tests are cheap (backend ~8s, frontend <1s) and should be
 the reflex. They render components directly, though, so they cannot see whether
@@ -164,6 +177,16 @@ defect this frontend has had was of that kind.
   `backend/aurcache-worker` is the `devtools` chroot executor, on the storage pool in
   `backend/aurcache-chroot`; `aurcache-worker-docker` is the per-build container executor
   (the hybrid image embeds it), and `aurcache-worker-demo` produces synthetic packages for demo instances.
+- The Docker worker runs each build with a build agent. `backend/aurcache-build-agent` is the program
+  inside the build container: statically linked, brought by the worker and not part of the builder
+  image, it does a root step (pacman configuration, image upgrade, build user), has that user (no
+  capabilities, `no_new_privs`) print the `.SRCINFO`, installs the dependencies it names as root, then
+  drops to that user for good, runs makepkg without `-s`, and writes a report. Which dependencies a
+  build installs is `aurcache_common::build_deps`, the same rule the chroot worker's `stage_build_deps`
+  uses. Its library half is the interface the workers speak to it (`BuildSpec`, `BuildReport`,
+  the work directory's layout), pinned by fixtures under `tests/fixtures/interface-1/`.
+  `backend/aurcache-worker-container` is the worker's side: a claimed job into a spec and its input, and
+  how a container ended into one terminal report.
   `backend/aurcache-sandbox` confines PKGBUILD code with Landlock, for the server's parse and a build.
 - `backend/aurcache-cli` is a typed CLI for the HTTP API (`cargo run -p aurcache-cli -- ...`); the reusable
   Rust client library backing it lives in `backend/aurcache-client`. It authenticates via
