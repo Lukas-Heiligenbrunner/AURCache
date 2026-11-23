@@ -40,6 +40,10 @@ socket: the directory must be a path the Docker daemon can bind, with the same
 directory visible to the worker. Without it, the [hybrid image](./hybrid.md)
 builds against a Podman it runs inside its own container.
 
+The worker creates the directory mode `0700` and warns at startup when it is
+open to others: keep it `0700`, owned by the worker's user
+([why](../overview/upgrading.md#from-0-6)).
+
 ## Running it by itself
 
 Outside the hybrid image the worker is one program, `aurcache-worker-docker`,
