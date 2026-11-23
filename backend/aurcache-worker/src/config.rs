@@ -10,7 +10,9 @@ use crate::cache::CacheLimits;
 use crate::cgroup::BuildLimits;
 use crate::settings::keys;
 use aurcache_worker_core::config::{CoreConfig, env_opt};
+use aurcache_worker_core::repo::Endpoint;
 use aurcache_worker_core::settings::WorkerSettings;
+use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -51,6 +53,10 @@ pub struct Config {
     /// identity and build credentials are protected from PKGBUILD code by file
     /// ownership, which only separates them if the two users differ.
     pub build_user: String,
+    /// Local destinations that every build on this worker may reach
+    /// (`WORKER_BUILD_ALLOW`), besides what its `pacman.conf` names; see
+    /// [`crate::build_firewall`]. The machine's alone, like the build user.
+    pub build_allow: Vec<Endpoint>,
     /// This executor's declared settings, read from the worker's resolution
     /// of them.
     pub tunables: Tunables,
@@ -131,6 +137,9 @@ impl Config {
             chroot_dir: chroot_dir.clone(),
             cache_dir: pool_mountpoint(pool.clone(), &chroot_dir).join(CACHE_SUBVOLUME),
             build_user: env_opt("WORKER_BUILD_USER").unwrap_or_else(|| "builder".to_string()),
+            build_allow: env_opt("WORKER_BUILD_ALLOW")
+                .map(|raw| build_allow(&raw))
+                .unwrap_or_default(),
             pool_backing: pool_backing(
                 pool.clone(),
                 env_opt("WORKER_DISK_RESERVE").is_some_and(|v| truthy(&v)),
@@ -180,6 +189,47 @@ impl Config {
             crate::settings::chroot_settings(),
         ))
     }
+}
+
+/// Parse `WORKER_BUILD_ALLOW`, saying which entries are left out.
+fn build_allow(raw: &str) -> Vec<Endpoint> {
+    let mut entries: Vec<Endpoint> = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        match host_port(entry) {
+            Ok(parsed) if !entries.contains(&parsed) => entries.push(parsed),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("WORKER_BUILD_ALLOW: ignoring {e}"),
+        }
+    }
+    entries
+}
+
+/// One `host:port` entry, an IPv6 address in brackets.
+fn host_port(raw: &str) -> Result<Endpoint, String> {
+    let invalid = || format!("not host:port: {raw:?}");
+    let (host, port) = if let Some(rest) = raw.strip_prefix('[') {
+        let (host, port) = rest.split_once("]:").ok_or_else(invalid)?;
+        // A zone (`fe80::1%eth0`) does not parse: the rules match an address,
+        // not the interface that a zone names.
+        host.parse::<Ipv6Addr>().map_err(|_| invalid())?;
+        (host, port)
+    } else {
+        let (host, port) = raw.rsplit_once(':').ok_or_else(invalid)?;
+        let name = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_');
+        if host.is_empty() || !host.chars().all(name) {
+            return Err(invalid());
+        }
+        (host, port)
+    };
+    let port = port
+        .parse::<u16>()
+        .ok()
+        .filter(|p| *p != 0)
+        .ok_or_else(invalid)?;
+    Ok(Endpoint {
+        host: host.to_ascii_lowercase(),
+        port,
+    })
 }
 
 impl Tunables {
@@ -340,6 +390,48 @@ pub struct CacheBudgets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(host: &str, port: u16) -> Endpoint {
+        Endpoint {
+            host: host.to_string(),
+            port,
+        }
+    }
+
+    #[test]
+    fn an_allowed_destination_is_a_host_and_a_port() {
+        assert_eq!(host_port("distcc.lan:3632"), Ok(at("distcc.lan", 3632)));
+        assert_eq!(host_port("192.168.1.5:22"), Ok(at("192.168.1.5", 22)));
+        assert_eq!(host_port("[fd00::5]:3632"), Ok(at("fd00::5", 3632)));
+        assert_eq!(host_port("GitLab.LAN:22"), Ok(at("gitlab.lan", 22)));
+        for invalid in [
+            "distcc.lan",
+            ":22",
+            "host:0",
+            "host:65536",
+            "host:ssh",
+            "fd00::5:22",
+            "[fd00::5]",
+            "[not-v6]:22",
+            "http://x:80",
+            // The rules match an address, not the interface that a zone names.
+            "[fe80::1%eth0]:22",
+        ] {
+            assert_eq!(
+                host_port(invalid),
+                Err(format!("not host:port: {invalid:?}")),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_allowlist_keeps_what_parsed_once() {
+        assert_eq!(
+            build_allow("distcc.lan:3632, [fd00::5]:22,,nope,distcc.lan:3632"),
+            [at("distcc.lan", 3632), at("fd00::5", 22)]
+        );
+    }
 
     fn budgets(src: u64, pkg: u64) -> CacheBudgets {
         CacheBudgets { src, pkg }
