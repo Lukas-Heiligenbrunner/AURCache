@@ -56,11 +56,15 @@ pub struct DockerExecutor {
     /// How spawned build containers are attached to the network, so the repo
     /// URL in the job's pacman.conf resolves from inside them.
     network: NetworkPlan,
+    /// This worker's own part of the names of its containers and build
+    /// directories ([`aurcache_worker_core::identity::Identity::tag`]).
+    tag: String,
 }
 
 impl DockerExecutor {
-    /// Connect to the Docker daemon over the mounted socket.
-    pub async fn connect(cfg: Config) -> Result<Self> {
+    /// Connect to the Docker daemon over the mounted socket. `tag` names this
+    /// worker in the names of its containers and build directories.
+    pub async fn connect(cfg: Config, tag: String) -> Result<Self> {
         let docker = Docker::connect_with_unix_defaults()?;
         docker.ping().await.map_err(|e| {
             anyhow!(
@@ -79,12 +83,14 @@ impl DockerExecutor {
             cfg: Live::new(cfg),
             docker,
             network,
+            tag,
         })
     }
 
-    /// Local and container-visible paths for one build's shared directory.
+    /// Local and container-visible paths for one build's shared directory,
+    /// named like its container.
     fn job_dirs(&self, cfg: &Config, build_id: i32) -> BuildDirs {
-        let name = build_id.to_string();
+        let name = dir_name(&self.tag, build_id);
         BuildDirs {
             host: cfg.dirs.host.join(&name),
             local: cfg.dirs.local.join(&name),
@@ -224,7 +230,7 @@ impl DockerExecutor {
             ),
         );
 
-        let container_name = format!("aurcache_build_{build_id}");
+        let container_name = container_name(&self.tag, build_id);
         let body = ContainerCreateBody {
             image: Some(cfg.builder_image.clone()),
             attach_stdout: Some(true),
@@ -445,6 +451,18 @@ fn world_writable(path: &Path) {
     }
 }
 
+/// The name of a build's container: this worker's tag, then the build. The
+/// engine may be shared with a worker of another server, whose build ids are
+/// the same numbers.
+fn container_name(tag: &str, build_id: i32) -> String {
+    format!("aurcache_build_{tag}_{build_id}")
+}
+
+/// Named like [`container_name`], for the same reason.
+fn dir_name(tag: &str, build_id: i32) -> String {
+    format!("{tag}_{build_id}")
+}
+
 /// Map an Arch architecture name onto Docker's platform vocabulary.
 ///
 /// `None` for anything unrecognised: pulling the amd64 image for a job that
@@ -480,6 +498,17 @@ mod tests {
             etc_bind(Path::new("/srv/build/7"), "pacman.conf", "/etc/pacman.conf"),
             "/srv/build/7/pacman.conf:/etc/pacman.conf"
         );
+    }
+
+    /// Two workers on one engine and one `BUILD_ARTIFACT_DIR`, building the
+    /// same build number of two servers, share neither name.
+    #[test]
+    fn names_are_the_workers_and_the_builds() {
+        assert_eq!(
+            container_name("0123456789abcdef", 7),
+            "aurcache_build_0123456789abcdef_7"
+        );
+        assert_eq!(dir_name("0123456789abcdef", 7), "0123456789abcdef_7");
     }
 
     /// An arch nobody taught the mapper must refuse the job, not silently
