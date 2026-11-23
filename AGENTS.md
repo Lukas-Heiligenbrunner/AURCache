@@ -181,7 +181,8 @@ defect this frontend has had was of that kind.
   serialized so the explanatory comments survive. `repo config --install` appends to pacman.conf,
   falling back to `sudo` only on a permission error, and asks `GET /repo/info` how the repository is
   published when a token is configured (host substitution shared with the worker template through
-  `aurcache_common::repo`).
+  `aurcache_common::repo`); for a signed repository it first offers, behind a prompt showing the
+  fingerprint, to add and `--lsign-key` the key `GET /repo/key` serves.
 - `backend/aurcache-common` is the shared leaf crate: the API types the server, CLI and browser frontend
   all speak, plus small helpers that would otherwise be duplicated or force a heavy dependency. Everything
   in it is dependency-free or behind a feature — `db` (sea-orm derives) and `fs` (filesystem helpers) are

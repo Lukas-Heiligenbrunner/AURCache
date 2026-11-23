@@ -98,9 +98,43 @@ pub fn host_from_url(url: &str) -> Option<&str> {
     (!host.is_empty()).then_some(host)
 }
 
+/// Where the API at `api_url` serves the repository's public key.
+#[must_use]
+pub fn key_url(api_url: &str) -> String {
+    format!("{}/repo/key", api_url.trim_end_matches('/'))
+}
+
+/// The commands that make pacman trust a signed repository's key, as someone
+/// would type them, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyTrustCommands {
+    /// `--add -` for the pipe: `pacman-key --add` with no file refuses.
+    pub add: String,
+    /// By the reported fingerprint, so that under `SigLevel = Required` a
+    /// served key that is not that one stays untrusted.
+    pub lsign: String,
+}
+
+impl KeyTrustCommands {
+    /// For the key `key_url` serves, whose fingerprint is `fingerprint`.
+    #[must_use]
+    pub fn new(key_url: &str, fingerprint: &str) -> Self {
+        Self {
+            add: format!(
+                "curl -fsSL {} | sudo pacman-key --add -",
+                crate::shell::quote_argument(key_url)
+            ),
+            lsign: format!(
+                "sudo pacman-key --lsign-key {}",
+                crate::shell::quote_argument(fingerprint)
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{host_from_url, server_url_for_host, validate_name};
+    use super::{KeyTrustCommands, host_from_url, key_url, server_url_for_host, validate_name};
 
     #[test]
     fn repository_names_are_safe_filenames_and_pacman_sections() {
@@ -126,6 +160,22 @@ mod tests {
         ] {
             assert!(validate_name(name).is_err(), "{name:?}");
         }
+    }
+
+    #[test]
+    fn the_key_is_fetched_and_signed_by_its_fingerprint() {
+        let commands = KeyTrustCommands::new(
+            &key_url("http://aurcache.example.com:8080/api/"),
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+        );
+        assert_eq!(
+            commands.add,
+            "curl -fsSL http://aurcache.example.com:8080/api/repo/key | sudo pacman-key --add -"
+        );
+        assert_eq!(
+            commands.lsign,
+            "sudo pacman-key --lsign-key 0123456789ABCDEF0123456789ABCDEF01234567"
+        );
     }
 
     /// Only the host changes: the rest describes how the repository is
