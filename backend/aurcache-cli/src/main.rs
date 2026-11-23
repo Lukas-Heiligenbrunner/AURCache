@@ -142,13 +142,21 @@ async fn published_repo(
     }
 }
 
-/// Ask the server, without a token, whether it signs its repository and with
-/// which key: pacman refuses a signed repository whose key it does not trust,
-/// so a stanza written without knowing would fail. `None` when it does not
-/// sign, or cannot say -- a server from before signing has no such route.
+/// Whether the server signs, asked without a token. `None` if it does not, or
+/// (404) predates signing; other errors are warned of.
 async fn repo_signing(api_url: &str) -> Option<SigningInfo> {
     let client = AurCacheClient::new(api_url.to_string(), None).ok()?;
-    client.repo_signing().await.ok().flatten()
+    match client.repo_signing().await {
+        Ok(signing) => signing,
+        Err(e) if aurcache_client::is_not_found(&e) => None,
+        Err(e) => {
+            eprintln!(
+                "Warning: could not ask {api_url} whether it signs the repository ({e:#}); \
+                 writing the stanza as for an unsigned one. Pass --offline to skip this check."
+            );
+            None
+        }
+    }
 }
 
 /// Print the `pacman.conf` stanza, using optional server metadata.
