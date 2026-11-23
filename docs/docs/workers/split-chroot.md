@@ -582,9 +582,13 @@ connection a build makes, in this order:
    LAN mirror, the mirrorlist that AURCache sends).
 3. **Local destinations are refused**:
    - loopback, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
-     `169.254.0.0/16`, `100.64.0.0/10`, `fc00::/7`, `fe80::/10` and
-     multicast;
+     `169.254.0.0/16`, `100.64.0.0/10`, `240.0.0.0/4`, `fc00::/7`,
+     `fe80::/10` and multicast;
    - every address of the worker's own machine, its public ones included;
+   - the worker's links: the prefix of every address on its interfaces,
+     however it got there (DHCP, `noprefixroute`, a VRF), and the peer of a
+     point-to-point link. A LAN on public IPv4 addresses, or the global IPv6
+     addresses of a dual-stack one, is local by this rule;
    - every address of the server's hosts -- the repository's, and the one in
      the worker's `AURCACHE_URL` -- wherever they are: on your LAN, on another
      VLAN of a routed network, or on the internet. Past the repository
@@ -614,13 +618,17 @@ refused and why:
 [worker]   192.168.1.20:3632/tcp: a local address
 ```
 
-Names are resolved when each build starts, so a host whose address changed
-is picked up by the next build without a restart. A name in the allowlist
-that does not resolve is left out, and the build's log says so. The server's
-hosts -- the repository's, and the one in `AURCACHE_URL` -- are resolved at
-startup too, and a worker whose server's hosts do not resolve then takes no
-builds. Builds only add to their addresses, so an address that the server's
-hosts no longer have stays refused until the worker restarts.
+Names are resolved, and the worker's links read, when each build starts, so
+a host whose address changed, or a prefix that the network added, is picked up
+by the next build without a restart. A destination beyond a router -- the
+internet, through the default route -- is on none of those prefixes, and stays
+reachable. A name in the allowlist that does not resolve is left out, and the
+build's log says so. The server's hosts -- the repository's, and the one in
+`AURCACHE_URL` -- are resolved, and the worker's links read, at startup too,
+and a worker that fails at either then takes no builds. Builds only add to
+what they make local, so an address that the server's hosts no longer have,
+or a prefix that the worker no longer has, stays refused until the worker
+restarts.
 
 The rules match the build's cgroup, which holds everything the build runs,
 root in its containers included, from before the first of it starts; the
@@ -687,10 +695,18 @@ What the policy does not cover:
   the internet does, so it needs OAuth. A firewall that admits only
   the workers' addresses to it does not tell builds from workers, since builds
   connect from those same addresses.
-- **Anything else on a public address**: only local addresses, and the
-  server's hosts, are refused. That includes a LAN on public IPv4
-  addresses, and the global IPv6 addresses of a dual-stack one, which no
-  fixed range calls local.
+- **Anything else on a public address**: only local addresses, the
+  worker's links and the server's hosts are refused.
+- **A destination reached through a route you added**, a VPN's or a static
+  one, unless it is local otherwise: the worker's links are the prefixes of
+  its own addresses, and a tunnel that carries the internet is routed the
+  same way as one that carries a LAN.
+- **A containerised worker on a bridge network**: its links are the
+  container's own, so the host's LAN counts as local only through the fixed
+  ranges.
+- **A LAN wider than the worker's address**: on a DHCPv6-only network the
+  host's address is a /128, so the LAN's /64 is not refused, and neither is a
+  default gateway outside every address prefix.
 - **`AF_VSOCK`**: no network namespace confines it and nftables cannot filter
   it, so where nothing else refuses it, a build on a worker in a virtual
   machine can reach the hypervisor's vsock services and vsock listeners in the
