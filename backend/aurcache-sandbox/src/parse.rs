@@ -39,12 +39,9 @@
 //! `truncate`, TCP and signals -- and needs ABI v6, Linux 6.12. Older is a
 //! refusal, never an unconfined parse.
 //!
-//! **Either way**, the `NO_VSOCK` seccomp filter of `seccomp.rs` is
-//! installed last, after Landlock: no network namespace confines vsock, so on
-//! a server in a virtual machine a parse could otherwise reach the
-//! hypervisor's vsock services and the machine's own vsock listeners. An
-//! emulated process cannot install it; the parse then runs anyway, after a
-//! warning on stderr.
+//! **Either way**, the vsock filter (`seccomp::Policy::NoVsock`) is
+//! installed last, after Landlock. An emulated process cannot install it;
+//! the parse then runs anyway, after a warning on stderr.
 //!
 //! `AURCACHE_SANDBOX_DISABLE=landlock` drops the Landlock layer, so the
 //! permissions alone can be tested on a host that has it.
