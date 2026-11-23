@@ -102,8 +102,8 @@ struct Request {
 
 /// Why a build was not run.
 enum Failure {
-    /// The protected-path list cannot be read, or names a path under a
-    /// directory that does not exist.
+    /// The protected-path list cannot be read, names a path under a
+    /// directory that does not exist, or protects `/`.
     BadPolicy(String),
     /// Landlock could not be applied in full.
     Unconfined(String),
@@ -207,8 +207,8 @@ enum AgentSockets {
     KernelCannot,
     /// There is no list, or it lists nothing: nothing is protected.
     NothingProtected,
-    /// The list cannot be read, or names a path under a missing directory:
-    /// every build is refused.
+    /// The list cannot be read, names a path under a missing directory, or
+    /// protects `/`: every build is refused.
     BadPolicy(String),
     /// The list does not protect the agents' directory.
     AgentsUnprotected(PathBuf),
@@ -405,7 +405,7 @@ fn resolve_unix_supported() -> bool {
 /// readable while looking exactly like a confined build.
 ///
 /// Each listed path is protected where it really is, whether or not it exists
-/// yet ([`crate::with_real_paths`]).
+/// yet, and one that really is `/` is an error ([`crate::exclusions`]).
 fn protected_paths(file: &Path) -> Result<Vec<PathBuf>, String> {
     let contents = match read_policy(file) {
         Ok(contents) => contents,
@@ -419,14 +419,21 @@ fn protected_paths(file: &Path) -> Result<Vec<PathBuf>, String> {
         }
         Err(unreadable) => return Err(unreadable.refusal(file)),
     };
-    Ok(crate::with_real_paths(
-        contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(PathBuf::from)
-            .collect(),
-    ))
+    let listed: Vec<PathBuf> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(PathBuf::from)
+        .collect();
+    crate::exclusions(&listed).map_err(|root| {
+        format!(
+            "{}, in the protected-path list {}, is the whole filesystem, and a build that \
+             can read nothing cannot run; refusing to build: list the directories to protect \
+             instead",
+            root.display(),
+            file.display()
+        )
+    })
 }
 
 /// The most a protected-path list may hold: far more than any list of paths
@@ -751,6 +758,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A list protecting `/` refuses every build, which the sandbox answers
+    /// as a bad policy, whatever the kernel.
+    #[test]
+    fn a_root_policy_protects_no_agents() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-agents-root-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("worker/agent")).unwrap();
+        let file = dir.join("list");
+        std::fs::write(&file, "/\n").unwrap();
+
+        let protected = protected_paths(&file);
+        for kernel_can in [true, false] {
+            let sockets = agent_sockets(kernel_can, &protected, &dir.join("worker/agent"));
+            assert!(matches!(sockets, AgentSockets::BadPolicy(_)));
+            assert!(capability_line(&sockets).starts_with("no-resolve-unix: bad policy (/, in"));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The agents' directory reached through a symlink is protected where it
     /// really is, as the read walk protects a listed path at its real path.
     #[test]
@@ -1030,6 +1059,34 @@ mod tests {
                     .join("key"),
             ]
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A listed path that really is `/` refuses the build: protecting it
+    /// cannot mean anything a build can run under, and the walk would
+    /// otherwise ignore it without a word.
+    #[test]
+    fn protecting_the_root_refuses() {
+        let dir =
+            std::env::temp_dir().join(format!("aurcache-sandbox-test-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("root");
+        std::os::unix::fs::symlink("/", &root).unwrap();
+        let file = dir.join("list");
+
+        for listed in ["/", "//", "/.", "/usr/..", root.to_str().unwrap()] {
+            std::fs::write(&file, format!("/etc/aurcache/identity\n{listed}\n")).unwrap();
+            assert_eq!(
+                protected_paths(&file).unwrap_err(),
+                format!(
+                    "{listed}, in the protected-path list {}, is the whole filesystem, and a \
+                     build that can read nothing cannot run; refusing to build: list the \
+                     directories to protect instead",
+                    file.display()
+                )
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

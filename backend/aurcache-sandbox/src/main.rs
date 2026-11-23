@@ -140,6 +140,20 @@ fn with_real_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         .collect()
 }
 
+/// `listed`, each where it really is ([`with_real_paths`]), to be kept
+/// unreadable by [`read_grants_excluding`]; or, as the error, the listed path
+/// that really is `/`. The walk never meets `/` as an entry, so it would
+/// ignore that one without a word while honouring the rest, and protecting `/`
+/// cannot mean anything a confined program can run under either: it could read
+/// nothing, its own executable included.
+fn exclusions(listed: &[PathBuf]) -> Result<Vec<PathBuf>, PathBuf> {
+    let real = with_real_paths(listed.to_vec());
+    match real.iter().position(|path| path == Path::new("/")) {
+        Some(at) => Err(listed[at].clone()),
+        None => Ok(real),
+    }
+}
+
 /// How many symlinks [`real_path`] follows before giving up, as many as the
 /// kernel does.
 const MAX_LINKS: usize = 40;

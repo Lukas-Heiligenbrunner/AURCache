@@ -167,6 +167,9 @@ that file as the build user, so keep it readable by everyone: it lists paths,
 not secrets. A file that exists but cannot be read, such as one at `0600
 root`, anything but a regular file, or a symlink to nothing or a path reached
 through one, refuses every build. Only a missing file means "protect nothing".
+A list naming `/`, or a path that resolves to it, refuses every build too: a
+build that can read nothing cannot run, so name the directories to protect
+instead.
 
 ## Both on one machine
 

@@ -17,6 +17,11 @@ several releases is each of their sections in turn, oldest first.
   protected-path list`. Before upgrading a worker, make the file readable by
   everyone (`chmod 644 /etc/aurcache/sandbox-protected`), and fix or remove a
   link to it that leads nowhere. See [the sandbox](../setup/native.md#aurcache-build-the-patched-makechrootpkg).
+- **Protecting `/` refuses every build or parse.** On 0.6.0 an entry in
+  `/etc/aurcache/sandbox-protected` naming `/`, or a path that resolves to it,
+  protected nothing, and nothing said so; so did one in
+  `AURCACHE_PROTECTED_DIR` on a native server. Both now refuse: every build,
+  every PKGBUILD parse. Name the directories to protect instead.
 
 ## From 0.5 {#from-0-5}
 
