@@ -27,6 +27,13 @@ several releases is each of their sections in turn, oldest first.
   `<worker>` is the start of its fingerprint, so that two instances on one
   Docker daemon or one build directory keep apart. A container or directory
   an older worker left under the old name is not removed by the new one.
+- **The Docker worker keeps `BUILD_ARTIFACT_DIR` to itself.** It makes the
+  directory mode `0700` when it is not there, and warns at startup when it is
+  open to others: root in a build container can leave a setuid-root file in
+  its build's directory, which anything else that can reach it could run --
+  another user on the host, or a PKGBUILD parse in the hybrid image.
+  Make an existing one `0700`, owned by the worker's user. The hybrid image no
+  longer creates it beforehand.
 
 ## From 0.5 {#from-0-5}
 

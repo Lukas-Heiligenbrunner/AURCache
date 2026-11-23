@@ -23,3 +23,6 @@ futures = "0.3"
 bollard = "0.21"
 aurcache-common = { path = "../aurcache-common" }
 aurcache-worker-core = { path = "../aurcache-worker-core" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

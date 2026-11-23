@@ -995,6 +995,7 @@ dependencies = [
  "aurcache-worker-core",
  "bollard",
  "futures",
+ "tempfile",
  "tokio",
  "tracing",
 ]

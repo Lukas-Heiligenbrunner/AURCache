@@ -106,10 +106,10 @@ else
     export AURCACHE_BUILDER_NETWORK="${AURCACHE_BUILDER_NETWORK:-host}"
     # And the build directory is one path, seen the same way from both sides.
     # Outside /app: its contents only last a build, and a mounted /app is
-    # the server's, which outlives this worker.
+    # the server's, which outlives this worker. The worker makes it, so one
+    # place covers every deployment, standalone workers included.
     export BUILD_ARTIFACT_DIR=/var/lib/aurcache-builds
     export BUILD_ARTIFACT_DIR_LOCAL=/var/lib/aurcache-builds
-    mkdir -p /var/lib/aurcache-builds
 fi
 
 # ---------------------------------------------------------------------------

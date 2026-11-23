@@ -4,6 +4,10 @@
 //! identity, same worker row — but builds each package in a container spawned
 //! from the builder image instead of a `devtools` chroot.
 
+use std::fs::{self, DirBuilder};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::Path;
+
 use anyhow::{Result, anyhow};
 
 use aurcache_worker_core::enroll;
@@ -26,6 +30,7 @@ async fn main() -> Result<()> {
         )
     })?;
 
+    make_private(&cfg.dirs.local);
     let identity = Identity::load_or_create(&core.data_dir)?;
     let executor = DockerExecutor::connect(cfg, identity.tag().to_string()).await?;
 
@@ -33,4 +38,42 @@ async fn main() -> Result<()> {
     let client = enroll::enroll(&core, &identity, DockerExecutor::KIND).await?;
 
     Runner::new(core, client, executor).run().await
+}
+
+/// Make `dir` mode 0700 when it is not there, and warn when it is open to
+/// others: a build can leave a setuid-root file in it, and Docker cannot bind
+/// a directory `nosuid`.
+fn make_private(dir: &Path) {
+    let made = DirBuilder::new().recursive(true).mode(0o700).create(dir);
+    match made.and_then(|()| fs::metadata(dir)) {
+        Err(e) => tracing::warn!("creating {}: {e}", dir.display()),
+        Ok(meta) if meta.permissions().mode() & 0o077 != 0 => tracing::warn!(
+            "{} is mode {:o}: make it 0700, owned by this worker's user, so nothing \
+             else can run a setuid file a build leaves there",
+            dir.display(),
+            meta.permissions().mode() & 0o7777
+        ),
+        Ok(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode(dir: &Path) -> u32 {
+        fs::metadata(dir).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn the_directory_is_made_for_its_owner_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("above/builds");
+        make_private(&dir);
+        assert_eq!(mode(&dir), 0o700);
+        // One that is there already is left as it is, only warned about.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        make_private(&dir);
+        assert_eq!(mode(&dir), 0o755);
+    }
 }
