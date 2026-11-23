@@ -50,6 +50,16 @@ jobs:
           echo "AURCACHE_PKGBUILD_BRIDGE=/usr/local/bin/alpm-pkgbuild-bridge" >> "$GITHUB_ENV"
           echo "AURCACHE_SANDBOX=$PWD/target/debug/aurcache-sandbox" >> "$GITHUB_ENV"
 
+      # `aurcache-utils/tests/ssh_clone.rs` clones over SSH from a throwaway
+      # `sshd` it runs as this user, and fails under CI rather than skip, so the
+      # server is installed here. sshd refuses a locked account even for key
+      # logins; `*` is "no password" without the lock.
+      - name: Install sshd
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server
+          sudo usermod -p '*' "$(id -un)"
+
       - name: Lint
         run: |
           cargo fmt -- --check

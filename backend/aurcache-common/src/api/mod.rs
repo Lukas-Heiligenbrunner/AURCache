@@ -17,6 +17,7 @@ pub mod operations;
 pub mod package;
 pub mod repo;
 pub mod settings;
+pub mod ssh;
 pub mod stats;
 pub mod waiting;
 pub mod worker;

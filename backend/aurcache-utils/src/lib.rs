@@ -26,6 +26,8 @@ pub mod settings;
 /// Signing what the repository published before it signed.
 pub mod signing;
 pub mod snapshot;
+/// The server's SSH key for cloning package sources.
+pub mod ssh;
 /// The numbers the stats page and the dashboard show.
 pub mod stats;
 pub mod vcs_check;

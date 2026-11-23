@@ -138,14 +138,16 @@ Compose setup](../setup/docker.md#what-to-persist) for what to persist.
 | Variable                   | Description                                                        | Default |
 |----------------------------|--------------------------------------------------------------------|---------|
 | AURCACHE_CA_DIR            | The internal CA that signs every worker's certificate, and the repository's signing key when it is signed. Losing it orphans every enrolled worker, and has every client trust a new key | `./data/ca` |
+| AURCACHE_SSH_DIR           | The server's SSH key for cloning package sources, and the host keys trusted on first contact; see [SSH package sources](./ssh-sources.md). Losing it means adding a new key to every private repository | `./data/ssh` |
 | AURCACHE_BUILD_LOG_PATH    | Build logs, one file per build                                     | `./build_logs` |
 | AURCACHE_SOURCE_CACHE_PATH | Checkouts of package sources, reused between builds; safe to lose  | `./source_cache` |
 | AURCACHE_MIRRORLIST_DIR    | Mirrorlists, one per architecture; see [Mirrorlist](./mirrorlist.md) | `./repo` |
 | OFFICIAL_REPO_CACHE_DIR    | The official repositories' databases, read to resolve dependencies | `<mirrorlist dir>/official_repo_cache` |
 | OFFICIAL_MIRRORLIST_PATH   | The mirrorlist those databases are fetched with                    | the x86_64 mirrorlist |
 
-In a container, when the first two are not set and their defaults are not on
-a volume, the server keeps them in the repository, as `repo/.ca` and
+In a container, when `AURCACHE_CA_DIR`, `AURCACHE_SSH_DIR` and
+`AURCACHE_BUILD_LOG_PATH` are not set and their defaults are not on a volume,
+the server keeps them in the repository, as `repo/.ca`, `repo/.ssh` and
 `repo/.build_logs`, which is what a 0.5 compose file persists. Once their
 directories are on a volume it moves them there at start; see [Hybrid
 image](../workers/hybrid.md#migrating).
@@ -184,6 +186,16 @@ What the server fetches packages and official databases from; see
 
 Point them at a mirror of the AUR, or at a local copy for an instance that must
 not reach the network.
+
+## Cloning package sources over SSH
+
+A package added from a git repository over SSH (`git@host:repo.git`) is cloned
+with the server's own SSH key; see [SSH package sources](./ssh-sources.md).
+
+| Variable                 | Description                                                  | Default |
+|--------------------------|--------------------------------------------------------------|---------|
+| AURCACHE_GIT_SSH_KEY     | A private key to clone with, without a passphrase. When set, no key is generated | a key generated in `AURCACHE_SSH_DIR` |
+| AURCACHE_SSH_KNOWN_HOSTS | A `known_hosts` file: only the host keys in it are trusted   | each host trusted on first contact, and held to that key |
 
 Builds run on [build workers](../workers/split-chroot.md), which are configured
 on the worker itself rather than here — including how many builds it runs at

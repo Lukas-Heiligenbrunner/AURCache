@@ -55,6 +55,106 @@ pub fn looks_like_git_url(s: &str) -> bool {
     s.contains('@') || s.contains("://")
 }
 
+/// Where an SSH git remote is: the account, the host, and the port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshRemote {
+    pub user: Option<String>,
+    pub host: String,
+    pub port: Option<u16>,
+}
+
+impl SshRemote {
+    /// How a `known_hosts` file names this host, as OpenSSH writes it: bare
+    /// on the default port, `[host]:port` on any other.
+    #[must_use]
+    pub fn known_hosts_name(&self) -> String {
+        let host = self.host.to_ascii_lowercase();
+        match self.port {
+            None | Some(22) => host,
+            Some(port) => format!("[{host}]:{port}"),
+        }
+    }
+}
+
+/// How a git source is reached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Ssh(SshRemote),
+    /// `https://`, `http://`, `git://`, `file://` or a local path: never SSH.
+    Other,
+}
+
+/// The source URLs that the server reads, for the refusal of any other.
+pub const SUPPORTED_GIT_URLS: &str = "a git source is an `https://`, `http://`, `git://` or \
+     `file://` URL, `ssh://[user@]host[:port]/path`, `user@host:path`, or a local path \
+     with no colon in it";
+
+/// How `url` is reached, or `None` when it is not one of the
+/// [`SUPPORTED_GIT_URLS`].
+///
+/// An allowlist, because libgit2 sends anything else with a colon in it over
+/// SSH, and its certificate callback is told the host but not the port: the
+/// host and port judged here must be the ones it connects to. Within these
+/// forms, where the account and host admit no brackets, `%`, `@` or `:`,
+/// libgit2 reads them the same way.
+#[must_use]
+pub fn transport(url: &str) -> Option<Transport> {
+    const NOT_SSH: [&str; 4] = ["https://", "http://", "git://", "file://"];
+    if NOT_SSH.iter().any(|scheme| url.starts_with(scheme)) || !url.contains(':') {
+        return Some(Transport::Other);
+    }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let (authority, _path) = rest.split_once('/')?;
+        let (user, host_port) = match authority.split_once('@') {
+            Some((user, host_port)) => (Some(user), host_port),
+            None => (None, authority),
+        };
+        let (host, port) = match host_port.split_once(':') {
+            Some((host, port)) if port.bytes().all(|c| c.is_ascii_digit()) => {
+                (host, Some(port.parse().ok()?))
+            }
+            Some(_) => return None,
+            None => (host_port, None),
+        };
+        return ssh(user, host, port);
+    }
+    let (user, rest) = url.split_once('@')?;
+    let (host, path) = rest.split_once(':')?;
+    if path.is_empty() {
+        return None;
+    }
+    ssh(Some(user), host, None)
+}
+
+/// The SSH remote that `url` names, if it is one.
+///
+/// Shared so that the add dialog says the server's key will be offered
+/// exactly when the server would offer it.
+#[must_use]
+pub fn ssh_remote(url: &str) -> Option<SshRemote> {
+    match transport(url)? {
+        Transport::Ssh(remote) => Some(remote),
+        Transport::Other => None,
+    }
+}
+
+fn ssh(user: Option<&str>, host: &str, port: Option<u16>) -> Option<Transport> {
+    let plain = |text: &str, extra: &[u8]| {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c) || extra.contains(&c))
+    };
+    if !plain(host, b".") || user.is_some_and(|user| !plain(user, b".")) {
+        return None;
+    }
+    Some(Transport::Ssh(SshRemote {
+        user: user.map(str::to_string),
+        host: host.to_string(),
+        port,
+    }))
+}
+
 /// How to write a source on screen: the AUR name, the git remote with its
 /// ref and subfolder, or a placeholder for an upload.
 ///
@@ -142,7 +242,71 @@ impl Display for SourceData {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceData, looks_like_git_url};
+    use super::{SourceData, SshRemote, Transport, looks_like_git_url, ssh_remote, transport};
+
+    #[test]
+    fn the_supported_forms_are_read_and_nothing_else() {
+        let ssh = |user: Option<&str>, host: &str, port| {
+            Some(Transport::Ssh(SshRemote {
+                user: user.map(str::to_string),
+                host: host.to_string(),
+                port,
+            }))
+        };
+        for (url, expected) in [
+            (
+                "git@github.com:user/repo.git",
+                ssh(Some("git"), "github.com", None),
+            ),
+            (
+                "aur@aur.archlinux.org:paru",
+                ssh(Some("aur"), "aur.archlinux.org", None),
+            ),
+            // A port is a path in the scp-like form, as git reads it.
+            ("git@host:2222/repo", ssh(Some("git"), "host", None)),
+            (
+                "ssh://git@git.example.com:2222/srv/r.git",
+                ssh(Some("git"), "git.example.com", Some(2222)),
+            ),
+            ("ssh://host/repo", ssh(None, "host", None)),
+            ("https://github.com/user/repo.git", Some(Transport::Other)),
+            ("git://host/repo", Some(Transport::Other)),
+            ("file:///srv/git/repo.git", Some(Transport::Other)),
+            ("/srv/git/repo.git", Some(Transport::Other)),
+        ] {
+            assert_eq!(transport(url), expected, "{url}");
+        }
+        // libgit2 would reach each of these over SSH, some on another port
+        // than a plain reading gives.
+        for url in [
+            "[git@host:2222]:repo.git",
+            "git@[::1]:repo",
+            "ssh://[::1]/repo",
+            "host:repo.git",
+            "./a:b",
+            "SSH://host/repo",
+            "git+ssh://host/repo",
+            "nope://host/repo",
+            "ssh://deploy:hunter2@host/repo",
+            "ssh://a@b@host/repo",
+            "ssh://ho%73t/repo",
+            "ssh://host:+22/repo",
+            "ssh://host:/repo",
+            "ssh://host",
+            " git@host:repo",
+            "git@host:",
+        ] {
+            assert_eq!(transport(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn known_hosts_names_follow_openssh() {
+        let name = |url| ssh_remote(url).unwrap().known_hosts_name();
+        assert_eq!(name("git@GitHub.com:u/r"), "github.com");
+        assert_eq!(name("ssh://git@github.com:22/u/r"), "github.com");
+        assert_eq!(name("ssh://git@host:2222/r"), "[host]:2222");
+    }
 
     #[test]
     fn detects_scp_like_git_urls() {
