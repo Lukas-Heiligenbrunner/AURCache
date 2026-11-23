@@ -74,8 +74,53 @@ async fn manual_names_work_when_the_server_cannot_report_its_name() {
     assert_eq!(config["server"], "http://127.0.0.1:9000/$arch");
 }
 
+/// A server from before signing answers `/repo/signing` with 404, which
+/// says it does not sign; any other failure is warned of, and the stanza is
+/// written as for an unsigned repository either way.
+#[tokio::test]
+async fn only_a_missing_signing_route_goes_unremarked() {
+    for (status, warned) in [(404, false), (503, true)] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/repo/signing"))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let output = run_config_output(
+            server.uri(),
+            vec!["--name", "manual_name", "--port", "9000"],
+            false,
+        )
+        .await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(
+            stderr.contains("whether it signs the repository"),
+            warned,
+            "{status}: {stderr}"
+        );
+        let config: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(config["key"], serde_json::Value::Null, "{config}");
+    }
+}
+
 async fn run_config(server: String, args: Vec<&'static str>, token: bool) -> serde_json::Value {
-    let output = tokio::task::spawn_blocking(move || {
+    let output = run_config_output(server, args, token).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+async fn run_config_output(
+    server: String,
+    args: Vec<&'static str>,
+    token: bool,
+) -> std::process::Output {
+    tokio::task::spawn_blocking(move || {
         let config_home = tempfile::tempdir().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_aurcli"));
         command
@@ -92,11 +137,5 @@ async fn run_config(server: String, args: Vec<&'static str>, token: bool) -> ser
             .unwrap()
     })
     .await
-    .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
+    .unwrap()
 }
