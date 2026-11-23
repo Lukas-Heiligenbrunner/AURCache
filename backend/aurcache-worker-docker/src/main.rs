@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     })?;
 
     let identity = Identity::load_or_create(&core.data_dir)?;
-    let executor = DockerExecutor::connect(cfg).await?;
+    let executor = DockerExecutor::connect(cfg, identity.tag().to_string()).await?;
 
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, DockerExecutor::KIND).await?;

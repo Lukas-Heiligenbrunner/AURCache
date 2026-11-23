@@ -22,6 +22,11 @@ several releases is each of their sections in turn, oldest first.
   protected nothing, and nothing said so; so did one in
   `AURCACHE_PROTECTED_DIR` on a native server. Both now refuse: every build,
   every PKGBUILD parse. Name the directories to protect instead.
+- **The Docker worker names its build containers and directories after
+  itself**: `aurcache_build_<worker>_<build>` and `<worker>_<build>`, where
+  `<worker>` is the start of its fingerprint, so that two instances on one
+  Docker daemon or one build directory keep apart. A container or directory
+  an older worker left under the old name is not removed by the new one.
 
 ## From 0.5 {#from-0-5}
 

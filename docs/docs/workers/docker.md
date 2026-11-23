@@ -20,6 +20,14 @@ the builder image with the engine's resource limits, streams the container's
 output into the build log, and uploads the packages the build leaves in the
 directory. The builder image needs pacman, makepkg and gpg.
 
+A build's container is named `aurcache_build_<worker>_<build>`, and its
+directory under `BUILD_ARTIFACT_DIR` is `<worker>_<build>`, where `<worker>`
+is the start of the worker's fingerprint. So two AURCache instances can share
+one Docker daemon, and one build directory, without taking each other's
+containers or directories for their own. A worker that enrolls again under a
+new identity (its data volume lost, say) has a new fingerprint, and does not
+clear what a build of its old identity left behind; remove those by hand.
+
 A build first syncs every repository, AURCache's included, then upgrades the
 container from the official ones alone -- or those the `pacman_conf` setting
 lists -- and only then installs its dependencies, which may come from

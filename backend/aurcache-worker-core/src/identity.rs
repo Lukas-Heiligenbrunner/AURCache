@@ -50,6 +50,14 @@ impl Identity {
         })
     }
 
+    /// A short name for this worker, for what it creates where other
+    /// workers create things too (containers on an engine they share): the
+    /// first sixteen hex digits of its fingerprint.
+    #[must_use]
+    pub fn tag(&self) -> &str {
+        &self.fingerprint[..16]
+    }
+
     /// Generate a PEM certificate signing request for this identity.
     pub fn generate_csr(&self, name: &str) -> Result<String> {
         let params =
@@ -113,6 +121,7 @@ mod tests {
         let b = Identity::load_or_create(dir.path()).unwrap();
         assert_eq!(a.fingerprint, b.fingerprint);
         assert_eq!(a.fingerprint.len(), 64);
+        assert_eq!(a.tag(), &a.fingerprint[..16]);
     }
 
     /// The worker computes its fingerprint from its own keypair with `rcgen`;
