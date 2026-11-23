@@ -964,6 +964,7 @@ dependencies = [
  "percent-encoding",
  "rcgen",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "tar",
