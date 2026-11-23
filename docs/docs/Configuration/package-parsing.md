@@ -61,4 +61,6 @@ Set it on the Settings page, or in the environment.
 
 `AURCACHE_PROTECTED_DIR` names further directories to keep unreadable
 (colon-separated). It adds to the list above rather than replacing it. In the
-container images these must be closed to other users too.
+container images these must be closed to other users too. Naming `/`, or a
+path that resolves to it, refuses every parse: a parse that can read nothing
+cannot run.

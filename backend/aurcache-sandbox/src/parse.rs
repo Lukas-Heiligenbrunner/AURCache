@@ -147,6 +147,16 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Request, Strin
 
 /// Confine this process and exec the program; returns only on failure.
 fn run(request: &Request, landlock_disabled: bool) -> Result<std::convert::Infallible, String> {
+    // Refused in either mode: the walk granting what is not private would
+    // ignore `/` without a word, and as root `check_closed` would instead
+    // advise closing `/`, or let `/missing/..` through.
+    if let Err(root) = crate::exclusions(&request.private) {
+        return Err(format!(
+            "--private {} is the whole filesystem, and a parse that can read nothing cannot run",
+            root.display()
+        ));
+    }
+
     let (Some(dir), Some(file)) = (request.pkgbuild.parent(), request.pkgbuild.file_name()) else {
         return Err(format!(
             "{} does not name a file",
@@ -587,6 +597,30 @@ mod tests {
             vec![store.join("key"), store.join("data"), store.join("up")]
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A private path that really is `/` refuses the parse, as root or not.
+    /// The PKGBUILD `/` names no file, so nothing is confined or run should
+    /// the check ever come later.
+    #[test]
+    fn a_private_root_is_refused() {
+        for listed in ["/", "/usr/.."] {
+            let request = Request {
+                pkgbuild: "/".into(),
+                private: vec!["/var/lib/aurcache/db".into(), listed.into()],
+                network: false,
+                program: "/bin/false".into(),
+                args: Vec::new(),
+            };
+            let Err(refused) = run(&request, false);
+            assert_eq!(
+                refused,
+                format!(
+                    "--private {listed} is the whole filesystem, and a parse that can read \
+                     nothing cannot run"
+                )
+            );
+        }
     }
 
     #[test]
