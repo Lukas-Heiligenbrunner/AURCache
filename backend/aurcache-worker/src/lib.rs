@@ -25,4 +25,3 @@ pub mod repo_db;
 /// What this executor declares it can be configured with.
 pub mod settings;
 pub mod srcdest_lock;
-pub mod ssh_key;

@@ -11,11 +11,11 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ssh_key;
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{Stop, StopWatch, log, report_warning, upload_artifacts};
+use aurcache_worker_core::ssh_key;
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, Access, BindMount};
