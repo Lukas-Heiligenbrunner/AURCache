@@ -75,7 +75,8 @@ async fn start() -> Result<Started> {
         // here and not its first build.
         let credential = files.load().await?;
         tracing::info!(
-            "Builds fetch their sources with the SSH key {} ({}). It stays in this pod, in an \
+            "Builds fetch their sources with the SSH key {} ({}), as the default key: a build \
+             whose package names another is offered none. It stays in this pod, in an \
              ssh-agent started for each build: a build can have it sign while it runs, and \
              never holds it",
             files.key.display(),

@@ -340,6 +340,11 @@ key `ssh-add` loads, without a passphrase, since there is no one to enter it.
 The dispatcher reads it again at the start of each build, so a changed Secret
 is used from the next build on.
 
+It is the dispatcher's default key, which a build is offered unless its
+package's **Build SSH key** names another. The dispatcher holds no [named
+keys](./credentials.md#named-keys), so a build whose package names one is
+offered no key at all, and its log says so.
+
 **The key never enters a build pod.** For each build, the dispatcher loads it
 into an OpenSSH `ssh-agent` in its own pod, and ssh in the build pod reaches
 that agent over an exec stream. The build has that while makepkg runs (not
@@ -365,8 +370,8 @@ So:
 
 - **Use a key made for builds, and for nothing else.** A deploy key that opens
   only what the packages need, read-only where the host allows it. One key is
-  given to every build the dispatcher runs; use [routing](./routing.md) to
-  send the packages that need it to this worker.
+  given to every build the dispatcher runs whose package names no other; use
+  [routing](./routing.md) to send the packages that need it to this worker.
 - **Do not register that key as a signing key anywhere.** Not as a signing
   key on GitHub or GitLab, and not in an `allowed_signers` file. Where nobody
   trusts the key's signatures, a signature a build made with it is worth

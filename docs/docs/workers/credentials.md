@@ -385,7 +385,7 @@ key should be one made for builds, and not registered as a signing key
 anywhere. The differences:
 
 - nothing is generated: a key must be given;
-- it holds that one key, as its default, and no [named keys](#named-keys)
+- each holds that one key, as its default, and no [named keys](#named-keys)
   (`WORKER_GIT_SSH_KEYS` is not read): a build whose package's **Build SSH
   key** names another is offered no key, and its log says so;
 - `known_hosts` is required, since a container is new for every build and an

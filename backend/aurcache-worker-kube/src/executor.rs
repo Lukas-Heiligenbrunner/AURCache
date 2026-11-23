@@ -27,14 +27,15 @@ use aurcache_worker_container::outcome::{
 use aurcache_worker_container::spec;
 use aurcache_worker_container::spec::SpecOptions;
 use aurcache_worker_container::ssh::link::Served;
-use aurcache_worker_container::ssh::{Credential, CredentialFiles};
+use aurcache_worker_container::ssh::{self, Credential, CredentialFiles};
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::{ClaimedJob, Executor};
 use aurcache_worker_core::live::Live;
-use aurcache_worker_core::protocol::{PackagesRefused, Stop, StopWatch};
+use aurcache_worker_core::protocol::{self, PackagesRefused, Stop, StopWatch};
 use aurcache_worker_core::report;
 use aurcache_worker_core::settings::WorkerSettings;
+use aurcache_worker_core::ssh_key;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Fuse, FusedFuture};
 use k8s_openapi::api::core::v1::Pod;
@@ -763,6 +764,14 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
         let cfg = self.cfg.current();
         let build_id = claimed.job.build_id;
         let pod = self.render(&cfg, &claimed)?;
+        // Decided before anything is prepared and said first in the build
+        // log, so a fetch that fails for want of a key has the reason above
+        // it. This worker holds no named key, so none is ever withheld.
+        let held = ssh::held(cfg.credential.as_ref());
+        let offer = ssh_key::offer(&claimed.job, &held, true);
+        if let Some(notice) = offer.notice(&claimed.job.pkgbase) {
+            protocol::log(&client, build_id, &format!("[worker] {notice}\n")).await;
+        }
         let source = client
             .source(build_id)
             .await
@@ -770,7 +779,7 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
         // An ssh-agent of this build's own, started from the files as they
         // are now, so that a key or host keys changed in the Secret are
         // used from the next build on. It is killed when this returns.
-        let credential: Option<Credential> = match &cfg.credential {
+        let credential: Option<Credential> = match offer.key() {
             Some(files) => match files.load().await {
                 Ok(credential) => Some(credential),
                 Err(error) => {
