@@ -4,7 +4,7 @@
 use crate::cli::OutputFormat;
 use anyhow::{Context, Result};
 use aurcache_client::{
-    GraphDataPoint, ListStats, OperationProgress, SearchResult, ServerInfo, UserInfo,
+    GraphDataPoint, ListStats, OperationProgress, SearchResult, ServerInfo, SshKey, UserInfo,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -158,6 +158,18 @@ pub(crate) fn print_user_info(user: &UserInfo) {
     println!("has_api_token: {}", user.has_api_token);
 }
 
+/// The server's SSH key: the public key alone on the first line, ready to
+/// paste into a forge's deploy-key form, and its fingerprint below.
+pub(crate) fn format_ssh_key(key: &SshKey) -> String {
+    match key {
+        SshKey::Ready {
+            public_key,
+            fingerprint,
+        } => format!("{public_key}\nfingerprint: {fingerprint}"),
+        SshKey::Unavailable { reason } => format!("no SSH key: {reason}"),
+    }
+}
+
 pub(crate) fn print_stats(stats: &ListStats) {
     println!("total_builds: {}", stats.total_builds);
     println!("successful_builds: {}", stats.successful_builds);
@@ -289,5 +301,21 @@ mod tests {
             timezone: None,
         };
         assert_eq!(format_health(&info), "ok (server 0.5.0+g8afa04a.dirty)");
+    }
+
+    /// The first line is the key and nothing else, so `| head -1` is what
+    /// goes into a forge's key form.
+    #[test]
+    fn the_ssh_key_comes_first_on_a_line_of_its_own() {
+        let key = SshKey::Ready {
+            public_key: "ssh-ed25519 AAAA aurcache-server".to_string(),
+            fingerprint: "SHA256:abc".to_string(),
+        };
+        let text = format_ssh_key(&key);
+        assert_eq!(
+            text.lines().next(),
+            Some("ssh-ed25519 AAAA aurcache-server")
+        );
+        assert!(text.contains("fingerprint: SHA256:abc"), "{text}");
     }
 }

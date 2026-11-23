@@ -15,6 +15,7 @@ mod package_scope;
 mod package_source;
 mod packages;
 pub mod settings;
+mod ssh_key;
 pub mod worker;
 pub mod workers;
 

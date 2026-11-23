@@ -60,6 +60,7 @@ pub fn build_api() -> Vec<Route> {
         crate::repo::repo_info,
         crate::repo::repo_key,
         crate::repo::repo_signing,
+        crate::ssh::ssh_key,
         log,
         get_settings,
         get_package_settings,

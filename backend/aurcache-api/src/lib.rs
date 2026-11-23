@@ -16,6 +16,7 @@ mod package;
 mod repo;
 mod settings;
 pub mod spa;
+mod ssh;
 mod stats;
 pub mod ui_cache;
 mod utils;

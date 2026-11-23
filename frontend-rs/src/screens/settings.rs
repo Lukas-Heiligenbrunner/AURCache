@@ -178,6 +178,7 @@ fn SettingsSections(
 
         ApiAccessSection {}
         RepositorySigningSection {}
+        crate::screens::ssh_key::SshKeySection {}
         crate::screens::backup::BackupSection {}
         }
     }
