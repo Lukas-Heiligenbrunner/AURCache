@@ -45,8 +45,8 @@ It listens on **8080** (API and web UI), **8081** (the pacman repository) and
 port variable in `server.env`, to keep it to one interface, add IPv6 or move it
 off a port something else holds; see [Where the server
 listens](../Configuration/environment-variables.md#where-the-server-listens).
-State lives in `/var/lib/aurcache`: the repository, the
-database, the worker CA and the build logs.
+State lives in `/var/lib/aurcache`: the repository, the database, the worker CA,
+the SSH key for cloning private package sources, and the build logs.
 
 ### Build logs
 

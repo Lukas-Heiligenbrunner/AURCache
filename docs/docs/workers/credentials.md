@@ -20,6 +20,10 @@ Because every build is offered the default key, it should reach nothing
 private. Put private access on a named key, set on the packages that need it,
 and route those packages to the worker that holds it.
 
+These keys are for what a build fetches. A package whose own repository is
+private is cloned by the server, before any build, with a key of the server's
+own; see [SSH package sources](../Configuration/ssh-sources.md).
+
 ## The default key
 
 ### Generated: a key per worker
