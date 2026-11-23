@@ -19,7 +19,7 @@ use aurcache_db::helpers::builds::latest_successful_build_vcs_sources;
 use aurcache_db::helpers::time::now_secs;
 use aurcache_db::package_vcs_sources::{self, Entity as PackageVcsSources};
 
-use crate::git::ls_remote;
+use crate::git::{Access, ls_remote};
 
 /// A single VCS source entry extracted from a package's `.SRCINFO`.
 ///
@@ -52,8 +52,11 @@ impl Remote {
     ///
     /// Blocking: performs network I/O and must be run via
     /// `tokio::task::spawn_blocking` from async code.
+    ///
+    /// Without the server's SSH key, which is for the package's own
+    /// repository: whoever wrote the PKGBUILD chose these remotes.
     fn resolve_commit(&self) -> anyhow::Result<String> {
-        ls_remote(&self.repo_url, &self.git_ref)
+        ls_remote(&self.repo_url, &self.git_ref, Access::Anonymous)
     }
 }
 

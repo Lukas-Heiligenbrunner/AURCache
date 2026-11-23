@@ -109,6 +109,23 @@ fn configured_ca_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("./data/ca"))
 }
 
+/// Where the server keeps its SSH key for cloning package sources, and the
+/// host keys that it has trusted on first contact.
+#[must_use]
+pub fn ssh_dir() -> PathBuf {
+    if let Some(kept) = HybridDir::Ssh.in_repository().get() {
+        return kept.clone();
+    }
+    configured_ssh_dir()
+}
+
+fn configured_ssh_dir() -> PathBuf {
+    crate::server_env::AURCACHE_SSH_DIR
+        .get()
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("./data/ssh"))
+}
+
 /// One path segment, with anything that is not a plain name flattened.
 ///
 /// A pkgbase from the AUR cannot contain a separator, but `AURCache` also builds

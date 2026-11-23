@@ -1,9 +1,9 @@
 #!/bin/sh
 # Close the server's private state to other users before it starts.
 #
-# On a kernel without Landlock, aurcache-sandbox confines PKGBUILD parsing by
-# running it as `aurcache-parse` and relying on ordinary file permissions --
-# and refuses to parse when one of these directories is open to other users.
+# The images run aurcache-sandbox as root, so it parses PKGBUILDs as
+# `aurcache-parse` and file permissions confine the parse on any kernel; it
+# refuses to parse when one of these directories is open to other users.
 # Setting the modes here, at every start, keeps that a property of the image
 # rather than something each place that creates a file must remember, and
 # fixes a volume a 0.5 image created on the first boot after the upgrade.
@@ -18,6 +18,7 @@ set -eu
 for dir in \
     ./db \
     "${AURCACHE_CA_DIR:-./data/ca}" \
+    "${AURCACHE_SSH_DIR:-./data/ssh}" \
     "${AURCACHE_BUILD_LOG_PATH:-./build_logs}" \
     "${AURCACHE_SOURCE_CACHE_PATH:-./source_cache}"; do
     mkdir -p "$dir"

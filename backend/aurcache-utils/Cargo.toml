@@ -11,10 +11,17 @@ workspace = true
 # Killing a parse's whole process group; see `pkgbuild::run_bounded`.
 libc = "0.2"
 # "https" enables the OpenSSL-backed HTTPS transport (required to clone AUR/git
-# sources over https://); "vendored-openssl" builds OpenSSL from source so we
-# don't depend on a system OpenSSL dev package being present (incl. for cross
+# sources over https://); "ssh" the libssh2 one, for sources that only the
+# server's SSH key can read; "vendored-openssl" builds OpenSSL from source so we don't
+# depend on a system OpenSSL dev package being present (incl. for cross
 # builds).
-git2 = { version = "0.21.0", features = ["https", "vendored-openssl"] }
+git2 = { version = "0.21.0", features = ["https", "ssh", "vendored-openssl"] }
+# The server's SSH key and the known_hosts format, in Rust: the server image
+# has no `ssh-keygen`.
+ssh-key = { version = "0.6.7", features = ["ed25519", "getrandom"] }
+# Matching the hashed host names that `ssh-keyscan -H` writes.
+hmac = "0.13.0"
+sha1 = "0.11.0"
 
 anyhow = {workspace = true}
 jiff = {workspace = true}
