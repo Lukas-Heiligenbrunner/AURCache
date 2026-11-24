@@ -35,6 +35,7 @@ impl WorkerKnobs {
         Ok(compose::WorkerEnv {
             pool: self.pool_setup(ask)?,
             url: None,
+            repo_url: None,
             ca_fingerprint: None,
             enrollment_token: self.enrollment_token.clone(),
             enrollment_dir: None,
