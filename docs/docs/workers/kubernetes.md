@@ -175,7 +175,7 @@ because they decide what a build may reach.
 |---|---|---|
 | `WORKER_KUBE_NAMESPACE` | `aurcache-builds` | Namespace build pods are created in. The Role and NetworkPolicy in the manifests are for this namespace: change them together. |
 | `WORKER_KUBE_BUILDER_IMAGE` | `ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest` | The image each build runs in. |
-| `WORKER_KUBE_IMAGE_PULL_POLICY` | `Always` | Pull policy for the images of a build pod, the builder's and the agent's: `Always`, `IfNotPresent` or `Never`; anything else is an error at startup. `Always` picks up a new image; use `IfNotPresent` for images you loaded onto the nodes by hand. |
+| `WORKER_KUBE_IMAGE_PULL_POLICY` | `Always` | Pull policy for the images of a build pod, the builder's and the agent's: `Always`, `IfNotPresent` or `Never`. The startup dry run refuses any other value. `Always` picks up a new image; use `IfNotPresent` for images you loaded onto the nodes by hand. |
 | `WORKER_KUBE_AGENT_IMAGE` | none, and required; the manifest sets it to the dispatcher's own image | Image build pods take the build agent from. Without it the dispatcher refuses to start. |
 | `WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS` | none | The SSH key builds fetch private sources with, and the host keys of the servers it is used with: files in the dispatcher's own pod. Both or neither. See [Build credentials](#build-credentials). |
 | `WORKER_KUBE_POD_TEMPLATE` | none | Path of a JSON file adding scheduling fields to every build pod. See [Architectures and scheduling](#architectures-and-scheduling). |
@@ -192,7 +192,7 @@ pins the value on the machine, and its `_DEFAULT` form (for example
 | `WORKER_BUILD_MEMORY_MAX` | `build_memory_max` | unset | Memory one build container may use, as its request and its limit. |
 | `WORKER_BUILD_CPUS` | `build_cpus` | unset | CPUs one build container may use, as its request and its limit; fractions are allowed. Also sizes the build's parallel jobs. `0` is no limit. |
 | `WORKER_BUILD_DISK_MAX` | `build_disk_max` | unset | Disk one build may write. Enforced by eviction; see below. |
-| `WORKER_KUBE_SCHEDULE_TIMEOUT` | `schedule_timeout` | `10m` | How long a build pod may wait for a node, then for its first container to start, then for the build container to start once the job is in, before the build is handed back to the server. |
+| `WORKER_KUBE_SCHEDULE_TIMEOUT` | `schedule_timeout` | `30m` | How long a build pod may take from its creation until its build runs (waiting for a node, pulling the images, taking the job) before the build is handed back to the server. |
 | `WORKER_KEYSERVER` | `keyserver` | the chroot worker's default | Keyserver used to fetch the keys a PKGBUILD names in `validpgpkeys`. Which keys are accepted is decided by the PKGBUILD, not by this. |
 
 Concurrency, priority, package affinity and the build timeout are the same
@@ -257,12 +257,10 @@ part of each pod runs from it. It is built for `x86_64`, `aarch64` and
 `armv7h`, and the dispatcher builds for those alone.
 
 For anything more, `WORKER_KUBE_POD_TEMPLATE` names a JSON file, usually
-mounted from a ConfigMap, with any of these fields and no others:
-`tolerations`, `affinity`, `nodeSelector`, `priorityClassName`,
-`runtimeClassName` (for example gVisor or Kata), `imagePullSecrets`,
-`schedulerName`, `topologySpreadConstraints`, `labels` and `annotations`. It
-cannot add a volume, a container or a security context, and a field outside
-that list is an error at startup.
+mounted from a ConfigMap, with any of `nodeSelector`, `tolerations` and
+`imagePullSecrets`, and no other field. It cannot add a volume, a container or
+a security context, and any other field is an error at startup. If you need
+another pod field there, open an issue.
 
 ```json
 {
@@ -383,7 +381,8 @@ starts.
   `Abandoned: its worker stopped reporting it.`) and queues a new build of each
   package, under a new number, while the package has attempts left. Pods also
   bound themselves: each carries a deadline of its build's timeout plus five
-  minutes, so one outlives a dispatcher that never comes back by at most that.
+  minutes (24 hours and five minutes for a build with no timeout), so one
+  outlives a dispatcher that never comes back by at most that.
   Five minutes is what the server allows too: that long after a build's
   timeout it takes the build back from a worker that has not reported it
   (`REAP_BACKSTOP_GRACE` on the server), and accepts nothing of it afterwards.
@@ -427,17 +426,26 @@ Not claiming builds while pod <name> has no node to run on: <the scheduler's mes
 Claiming builds again
 ```
 
-**A pod stays `Pending`, then the build is ended and tried again.** No node
-could take it within `WORKER_KUBE_SCHEDULE_TIMEOUT`. Meanwhile the build's log
-says `[worker] no node can take the build pod yet: <the scheduler's message>`,
-and the build ends with
-`no node could take the build within 10m (WORKER_KUBE_SCHEDULE_TIMEOUT): ...`.
-The server queues a new build of the package while it has attempts left. The
-scheduler's message gives the reason: the limits ask for more than any node has
-free (a set limit is also the request), no node carries the
-`kubernetes.io/arch` label for the package's architecture, or the selectors and
-tolerations in `WORKER_KUBE_POD_TEMPLATE` match nothing. Lower the limits, add
-capacity, or fix the template.
+**A build is ended with `the build pod did not start within 30m`, and tried
+again.** Its pod was not running the build within `WORKER_KUBE_SCHEDULE_TIMEOUT`
+of its creation. The reason names the last state the pod showed, which the
+build's log follows as it changes, and the server queues a new build of the
+package while it has attempts left. The pod's status seldom says the whole
+story; `kubectl -n aurcache-builds get events` does.
+
+- `no node can take the build pod yet: <the scheduler's message>`: the limits
+  ask for more than any node has free (a set limit is also the request), no
+  node carries the `kubernetes.io/arch` label for the package's architecture,
+  or the selectors and tolerations in `WORKER_KUBE_POD_TEMPLATE` match nothing.
+  Lower the limits, add capacity, or fix the template.
+- `(ErrImagePull: ...)` or `(ImagePullBackOff: ...)`: the nodes cannot pull the
+  builder image or the dispatcher's image. Check the registry and the names,
+  add `imagePullSecrets` through the pod template for a private registry, or
+  load the images onto the nodes and set
+  `WORKER_KUBE_IMAGE_PULL_POLICY=IfNotPresent`. Every node that builds pulls
+  the dispatcher's image, not only the one it runs on.
+- `(ContainerCreating)` or `(PodInitializing)` for the whole time: usually a pod
+  network the node cannot set up; the events say.
 
 **The dispatcher stops at startup with `the cluster does not admit a build
 pod`.** Before it enrolls, it asks the cluster with a server-side dry run
@@ -454,36 +462,19 @@ labelled `pod-security.kubernetes.io/enforce: baseline`. A `restricted` label
 there forbids the build container's capabilities and root user, and another
 admission policy may forbid the same: allow it for this namespace.
 
-**A pod stays `ContainerCreating` or `Init:0/1`, then the build is ended and
-tried again.** A node took the pod and could not start it within
-`WORKER_KUBE_SCHEDULE_TIMEOUT`. The build ends with
-`the build pod did not start within 10m ...`. The pod's status seldom says
-why; `kubectl -n aurcache-builds get events` does. The usual causes are an
-image that cannot be pulled and a pod network the node cannot set up.
-
 **Every build fails at `pacman -Sy` with `Could not resolve host`.** Builds
 cannot reach the cluster's DNS. On a cluster with NodeLocal DNSCache, see
 [What a build can reach](#what-a-build-can-reach).
-
-**`ErrImagePull` or `ImagePullBackOff`.** The nodes cannot pull the builder
-image or the dispatcher's image. The node tries again by itself, and the
-dispatcher waits for it up to `WORKER_KUBE_SCHEDULE_TIMEOUT`, saying so in the
-build's log; then the build ends and the server tries it again while it has
-attempts left. A name that cannot be pulled at all (`InvalidImageName`) ends it
-at once. Check the registry and the names, add `imagePullSecrets` through the
-pod template for a private registry, or load the images onto the nodes and set
-`WORKER_KUBE_IMAGE_PULL_POLICY=IfNotPresent`. Every node that
-builds pulls the dispatcher's image, not only the one it runs on.
 
 **Builds with an SSH key end at their `credential` step.** The log says
 why: `the worker did not open the link` when the dispatcher could not exec into
 the build container (check that its Role still allows `pods/exec`). The server
 builds the package again. See [Build credentials](#build-credentials).
 
-**The dispatcher will not start.** It names the problem: a pull policy outside
-the three, a pod template that cannot be read or has a field outside the allowed
-list, an SSH key without its `known_hosts` or one it cannot use, or no
-`WORKER_KUBE_AGENT_IMAGE`.
+**The dispatcher will not start.** It names the problem: a pod template that
+cannot be read or has a field outside the allowed list, an SSH key without its
+`known_hosts` or one it cannot use, or no `WORKER_KUBE_AGENT_IMAGE`. A pull
+policy Kubernetes does not know fails the startup dry run.
 
 **A build fails with `out of disk: the build passed its ephemeral-storage
 limit`.** Its pod was evicted for passing `build_disk_max`

@@ -194,7 +194,7 @@ defect this frontend has had was of that kind.
   build installs is `aurcache_common::build_deps`, the same rule the chroot worker's `stage_build_deps`
   uses. Its library half is the interface the workers speak to it (`BuildSpec`, `BuildReport`,
   the work directory's layout), pinned by fixtures under `tests/fixtures/interface-1/`; its transfer
-  subcommands (`stage`, `receive`, `tail`, `manifest`, `send`, `hold`) are what the Kubernetes worker
+  subcommands (`stage`, `receive`, `tail`, `manifest`, `send`) are what the Kubernetes worker
   runs through `exec`. `backend/aurcache-worker-container` is the workers' side: a claimed job into a
   spec and its input, how a container ended into one terminal report, so a build ends for the same
   reason on either, and the OpenSSH `ssh-agent` it starts for each build that is given the worker's SSH

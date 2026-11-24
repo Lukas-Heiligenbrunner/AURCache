@@ -104,12 +104,14 @@ of a build pod stops a dispatcher whose namespace, Pod Security level or
 policies refuse every build. A pod refused later (a quota with no room) is
 reported `Interrupted`.
 
-Each wait before the build runs gets `WORKER_KUBE_SCHEDULE_TIMEOUT`: for a
-node, for the pod to start on it, and for the build container to start once
-the job is in. Past it the build is reported `Interrupted`, so another worker
-may take it: an image that cannot be pulled, or a volume or network that
-cannot be set up, shows only in events and would otherwise be blamed on the
-package.
+A build must be running within `WORKER_KUBE_SCHEDULE_TIMEOUT` (30 minutes by
+default) of its pod's creation: one deadline for the node, the image pulls
+and the hand-in. Past it the build is reported `Interrupted` with the last
+state the pod showed, so another worker may take it: an image that cannot be
+pulled, or a volume or network that cannot be set up, shows only in events
+and would otherwise be blamed on the package. An image whose name nothing can
+pull waits out the deadline too; telling the kubelet's waiting reasons apart
+was set aside as more code than an occasional wait is worth.
 
 ### Architectures
 
@@ -121,8 +123,9 @@ pool scaled to zero is still capacity. A claim cannot name an architecture
 node holds back every architecture's builds. A dispatcher is therefore
 meant to build one; one per architecture, each with its builds namespace,
 keeps an architecture the cluster is short of from stopping the others.
-The operator's pod template is read as scheduling fields only, so it cannot
-add a volume, a container or a security context.
+The operator's pod template takes `nodeSelector`, `tolerations` and
+`imagePullSecrets` only, so it cannot add a volume, a container or a
+security context. Other fields are added when someone needs one.
 
 ### Restarts, stopping and orphans
 
@@ -140,9 +143,11 @@ both times stays until its deadline, or until the dispatcher next stops or
 starts.
 
 That deadline is the build's timeout plus five minutes, the server's
-`REAP_BACKSTOP_GRACE`, after which it refuses what the worker sends. No
-delete uses a grace of zero, which would leave the API before the node has
-confirmed the containers gone.
+`REAP_BACKSTOP_GRACE`, after which it refuses what the worker sends; a build
+with no timeout gets 24 hours. A panic in the dispatcher's build task is
+reported by the runner and leaves the pod to that deadline. No delete uses a
+grace of zero, which would leave the API before the node has confirmed the
+containers gone.
 
 ### The build pod
 
@@ -153,8 +158,10 @@ confirmed the containers gone.
   server's included. With a tag that moves, a node may pull another build
   of the agent than the dispatcher's; the agent refuses a job of another
   interface number, which keeps the two honest.
-- **`hold` is a regular container**: a native sidecar is stopped when the
-  build exits, before the packages are out. It runs no build code.
+- **`hold` is a regular container** running `sleep infinity` from the
+  agent's image, which the log and the packages are read through: a native
+  sidecar is stopped when the build exits, before the packages are out. It
+  runs no build code.
 - **The report is a file**, not the termination message, which the kubelet
   cuts at 4096 bytes.
 - **Nothing that grants anything is mounted**: no Secret, no ServiceAccount
@@ -180,7 +187,9 @@ figure.
 **Out, streamed.** The dispatcher has no disk for packages, so each file
 goes from a `send` exec straight into the upload's request body. It counts
 when the server accepted it, the exec ended cleanly and the byte count
-matches the manifest. There is no digest: nothing runs in the build
+matches the manifest; the upload declares that size, so a body that ends
+short fails the request too. A send that passes no byte for five minutes is
+given up, since the upload has no deadline of its own. There is no digest: nothing runs in the build
 container by then, and every hop is a byte stream whose failures the count
 and the exec status catch. The status alone does not: the API server can
 answer `Success` for a stream cut short (client-go reports no error when the
@@ -200,11 +209,15 @@ from the pod ("Later").
 
 The dispatcher follows the agent's log file with a `tail` exec, resuming
 from the last byte forwarded. A `tail` that succeeded may have been cut short
-too, so the log is read to its end only once a further `tail` from the last
-byte has nothing to send: one exec more per build. The kubelet's log API was
-set aside: following stops at rotation on some kubelets (k3s-io/k3s#9060,
-OCPBUGS-38861), only the newest file is served, and it cannot resume from a
-known point.
+too, so the hand-back manifest gives the log's length, as it gives each
+package's, and the dispatcher reads until it has that many bytes; a `tail`
+that ends, with bytes or without, never says the log is whole. The kubelet's
+log API was set aside: following stops at rotation on some kubelets
+(k3s-io/k3s#9060, OCPBUGS-38861), only the newest file is served, and it
+cannot resume from a known point. It is read only for the last lines of a
+build container that ended without a report. A dedicated stream was set aside
+too: surviving a cut would take a buffer and a resume offset, which is the
+file and `tail` again.
 
 What is the package's doing fails the build: makepkg's exit, out of memory,
 an eviction for passing its own disk limit. What is the cluster's or the
