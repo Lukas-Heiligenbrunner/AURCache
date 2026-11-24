@@ -533,6 +533,12 @@ events! {
         fingerprint: String,
     },
 
+    /// A restore wrote the dump's SSH key over this server's, which clones
+    /// use from then on: every remote has to accept it.
+    RestoreSshKeyReplaced => ("restore.ssh_key_replaced", "Backups", "SSH key restored") {
+        fingerprint: String,
+    },
+
     // -----------------------------------------------------------------------
     // Mirrors and the repository
     // -----------------------------------------------------------------------
@@ -835,6 +841,7 @@ impl Event {
             | Self::RestorePackageFailed { .. }
             | Self::RestoreCaReplaced {}
             | Self::RestoreSigningKeyReplaced { .. }
+            | Self::RestoreSshKeyReplaced { .. }
             | Self::WorkersUntrusted { .. }
             | Self::MirrorRankFailed { .. }
             | Self::OfficialReposRefreshFailed { .. }
@@ -1294,6 +1301,10 @@ impl Event {
                  signs with it from its next start with signing on, and every client has to \
                  trust it then"
             ))],
+            Self::RestoreSshKeyReplaced { fingerprint } => vec![text(format!(
+                "a restore replaced the server's SSH key with {fingerprint}; clones use it from \
+                 then on, so every remote has to accept it"
+            ))],
             Self::MirrorRankFailed { error } => {
                 vec![text(format!("could not rank the mirrors: {error}"))]
             }
@@ -1610,6 +1621,9 @@ mod tests {
             Event::RestoreCaReplaced {},
             Event::RestoreSigningKeyReplaced {
                 fingerprint: "0123456789ABCDEF0123456789ABCDEF01234567".to_string(),
+            },
+            Event::RestoreSshKeyReplaced {
+                fingerprint: "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU".to_string(),
             },
             Event::WorkersUntrusted {
                 workers: vec!["builder-01".to_string()],

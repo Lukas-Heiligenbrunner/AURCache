@@ -249,24 +249,45 @@ fn ensure(source: &KeySource) -> anyhow::Result<Identity> {
         }
         _ => {}
     }
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let key = PrivateKey::from_openssh(&text)
-        .with_context(|| format!("{} is not an OpenSSH private key", path.display()))?;
-    if key.is_encrypted() {
-        bail!(
-            "{} is protected by a passphrase, which the server cannot open: give it a key \
-             without one",
-            path.display()
-        );
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let public_key = public_half(&bytes).with_context(|| path.display().to_string())?;
+    if let KeySource::Generated(_) = source
+        && let Err(e) = write_public_half(path, &public_key)
+    {
+        tracing::warn!("{e:#}");
     }
     Ok(Identity {
         private_key: path.to_path_buf(),
-        public_key: key.public_key().clone(),
+        public_key,
     })
 }
 
-/// Generate an ed25519 key at `path`, private to this user, with its public
-/// half beside it as OpenSSH names it.
+/// The public half of `key`, if it is an OpenSSH private key the server can
+/// use.
+pub fn public_half(key: &[u8]) -> anyhow::Result<PublicKey> {
+    let key = PrivateKey::from_openssh(key).context("not an OpenSSH private key")?;
+    if key.is_encrypted() {
+        bail!("protected by a passphrase, which the server cannot open: give it a key without one");
+    }
+    Ok(key.public_key().clone())
+}
+
+/// Write `key` beside the private key at `path`, as OpenSSH names it, unless
+/// it is there already. Done at each start, so that it follows a key that a
+/// restore replaced.
+fn write_public_half(path: &Path, key: &PublicKey) -> anyhow::Result<()> {
+    let mut public = path.as_os_str().to_os_string();
+    public.push(".pub");
+    let public = PathBuf::from(public);
+    let line = format!("{}\n", key.to_openssh()?);
+    if fs::read_to_string(&public).is_ok_and(|on_disk| on_disk == line) {
+        return Ok(());
+    }
+    aurcache_common::fs::write_public(&public, line.as_bytes())
+        .with_context(|| format!("writing {}", public.display()))
+}
+
+/// Generate an ed25519 key at `path`, private to this user.
 fn generate(path: &Path) -> anyhow::Result<()> {
     create_private_dir(path)?;
     let mut key = PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
@@ -274,13 +295,7 @@ fn generate(path: &Path) -> anyhow::Result<()> {
     key.set_comment(KEY_COMMENT);
     let private = key.to_openssh(LineEnding::LF)?;
     aurcache_common::fs::write_private(path, private.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))?;
-    let mut public = path.as_os_str().to_os_string();
-    public.push(".pub");
-    let public = PathBuf::from(public);
-    let line = format!("{}\n", key.public_key().to_openssh()?);
-    aurcache_common::fs::write_public(&public, line.as_bytes())
-        .with_context(|| format!("writing {}", public.display()))
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Create the directory that holds `file`, if missing, closed to other users.

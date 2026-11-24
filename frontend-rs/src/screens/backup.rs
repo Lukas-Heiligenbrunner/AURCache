@@ -143,8 +143,8 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
     let mut preview = use_signal(Vec::<RestoreEntry>::new);
-    // What the restore does, or would do, with the dump's signing key.
-    let mut key_line = use_signal(|| Option::<&'static str>::None);
+    // What the restore does, or would do, with the files the server keeps.
+    let mut file_lines = use_signal(Vec::<String>::new);
     // Where a started restore goes once the dialog closes.
     let jobs = crate::progress::use_jobs();
 
@@ -152,7 +152,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
         file_name.set(String::new());
         bytes.set(bytes::Bytes::new());
         preview.set(Vec::new());
-        key_line.set(None);
+        file_lines.set(Vec::new());
         error.set(None);
         hovering.set(false);
         busy.set(false);
@@ -187,7 +187,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
                 // previewed; showing the old result against the new name would
                 // be worse than showing nothing.
                 preview.set(Vec::new());
-                key_line.set(None);
+                file_lines.set(Vec::new());
                 error.set(None);
                 file_name.set(name);
                 bytes.set(content);
@@ -224,8 +224,8 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
         match client.restore(bytes(), &options).await {
             Ok(accepted) => {
                 if dry_run {
+                    file_lines.set(accepted.file_lines(true));
                     preview.set(accepted.preview);
-                    key_line.set(accepted.signing_key.map(|key| key.line(true)));
                 } else if let Some(job_id) = accepted.job_id {
                     // Handed to the progress card and the dialog closes, rather
                     // than holding the page until every package is imported. A
@@ -244,11 +244,13 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
                         format!("Restoring {}", file_name()),
                     );
                     reset();
-                    // Left open to say what happens to the key, the one part
-                    // of a restore that waits for the next start.
-                    match accepted.signing_key {
-                        Some(key) => key_line.set(Some(key.line(false))),
-                        None => open.set(false),
+                    // Left open to say what happens to the files the server
+                    // keeps, which the progress card does not show.
+                    let lines = accepted.file_lines(false);
+                    if lines.is_empty() {
+                        open.set(false);
+                    } else {
+                        file_lines.set(lines);
                     }
                 }
             }
@@ -318,7 +320,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
                 if !preview().is_empty() {
                     RestoreReport { entries: preview(), blocked: blocked() }
                 }
-                if let Some(line) = key_line() {
+                for line in file_lines() {
                     div { class: "alert alert-info text-sm", span { "{line}" } }
                 }
             }
@@ -403,7 +405,8 @@ fn RestoreOptionsForm(
                         "Replaces this server's CA with the dump's. Every certificate your \
                          current workers hold was signed by the old one and stops working; \
                          they re-enrol. A signing key in the dump replaces this server's from \
-                         its next start. Ignored if the dump carries no secrets."
+                         its next start, and its SSH files replace this server's own. Ignored \
+                         if the dump carries no secrets."
                     }
                 }
             }

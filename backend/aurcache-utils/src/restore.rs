@@ -22,6 +22,7 @@
 //! either -- an imported graph could disagree with today's AUR -- so the depends
 //! lists have to be rediscovered from the sources regardless.
 
+use anyhow::Context;
 use aurcache_db::lists::{BuildFlags, Platforms, WorkerList};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
@@ -30,8 +31,8 @@ use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
     DumpSecrets, DumpSettings, DumpToken, DumpWorker, ExistingPackagePolicy, KNOWN_HOSTS_FILE,
     MANIFEST_FILE, PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome,
-    SETTINGS_FILE, SIGNING_KEY_FILE, SSH_KEY_FILE, SecretsPolicy, SigningKeyOutcome, TOKENS_FILE,
-    WORKERS_FILE,
+    SETTINGS_FILE, SIGNING_KEY_FILE, SSH_KEY_FILE, SecretFile, SecretFileReport, SecretsPolicy,
+    TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
@@ -49,6 +50,7 @@ use crate::repository::{Repository, read_if_there};
 use crate::services::Services;
 use crate::settings::Change;
 use crate::snapshot::SnapshotStore;
+use crate::ssh::SshFiles;
 use aurcache_activitylog::events::{Event, RestoreStep};
 
 /// A dump that has been read and checked, ready to apply.
@@ -348,7 +350,7 @@ pub async fn apply(
     ca_dir: &std::path::Path,
     dump: LoadedDump,
     options: RestoreOptions,
-    signing_key: Option<SigningKeyPlan>,
+    files: Vec<FilePlan>,
     progress: Sender<RestoreEntry>,
 ) {
     let Services {
@@ -385,16 +387,21 @@ pub async fn apply(
             .await;
         }
     }
-    if let Some(SigningKeyPlan::Replace { path, fingerprint }) = signing_key
-        && let Some(key) = dump.secrets.as_ref().and_then(|s| s.signing_key.as_deref())
-    {
-        match replace_signing_key(&path, key) {
-            Ok(()) => services
-                .activity
-                .emit(Event::RestoreSigningKeyReplaced { fingerprint }),
+    for plan in files {
+        let FileAction::Replace {
+            path,
+            content,
+            event,
+        } = plan.action
+        else {
+            continue;
+        };
+        match replace_file(&path, &content) {
+            Ok(()) => event.into_iter().for_each(|e| services.activity.emit(e)),
             Err(e) => {
                 let error = format!(
-                    "the packages were imported, but writing the signing key failed: {e:#}"
+                    "{}: not written, though the packages were imported: {e:#}",
+                    plan.file.name()
                 );
                 report_failure(&progress, "", error).await;
             }
@@ -536,71 +543,121 @@ fn write_secrets(
     Ok(true)
 }
 
-/// What a restore does with the dump's signing key, decided by
-/// [`plan_signing_key`] before anything is written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SigningKeyPlan {
-    /// Write the dump's key, whose primary key is `fingerprint`, at `path`
-    /// once the rows commit.
-    Replace { path: PathBuf, fingerprint: String },
-    /// The key file at the server's path already holds exactly the dump's.
+/// What a restore does with a file that the dump carries and the server
+/// keeps on disk, decided by [`plan_files`] before anything is written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilePlan {
+    pub file: SecretFile,
+    pub action: FileAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FileAction {
+    /// Write `content` at `path` once the rows commit, then record `event`.
+    Replace {
+        path: PathBuf,
+        content: Vec<u8>,
+        event: Option<Event>,
+    },
+    /// The server's file already holds exactly the dump's.
     Unchanged,
-    /// The server signs with a supplied key, which a restore never writes.
+    /// The operator supplies this file, which a restore never writes.
     KeptSupplied,
 }
 
-impl SigningKeyPlan {
+impl FilePlan {
     #[must_use]
-    pub const fn outcome(&self) -> SigningKeyOutcome {
-        match self {
-            Self::Replace { .. } => SigningKeyOutcome::Replaced,
-            Self::Unchanged => SigningKeyOutcome::Unchanged,
-            Self::KeptSupplied => SigningKeyOutcome::KeptSupplied,
+    pub const fn report(&self) -> SecretFileReport {
+        use aurcache_common::api::dump::FileOutcome;
+        SecretFileReport {
+            file: self.file,
+            outcome: match self.action {
+                FileAction::Replace { .. } => FileOutcome::Replaced,
+                FileAction::Unchanged => FileOutcome::Unchanged,
+                FileAction::KeptSupplied => FileOutcome::KeptSupplied,
+            },
         }
     }
 }
 
-/// What this restore will do with the dump's signing key, or `None` when it
-/// carries none or its secrets are not taken.
+/// What this restore will do with each file the dump carries; none when its
+/// secrets are not taken.
 ///
-/// Refused unless the key is one this server could sign with: it parses,
-/// unlocks with this server's passphrase (or needs none), has not expired and
-/// signs. Checked before anything is written, so a refusal imports nothing.
-pub fn plan_signing_key(
+/// Refused unless every key that would be written is one this server could
+/// use: a signing key that parses, unlocks with this server's passphrase (or
+/// needs none), has not expired and signs, and an SSH key that the server's
+/// loader accepts. Checked before anything is written, so a refusal imports
+/// nothing.
+pub fn plan_files(
     dump: &LoadedDump,
     options: &RestoreOptions,
-    config: &KeyConfig,
-) -> anyhow::Result<Option<SigningKeyPlan>> {
-    let Some(key) = dump.secrets.as_ref().and_then(|s| s.signing_key.as_deref()) else {
-        return Ok(None);
+    signing: &KeyConfig,
+    ssh: &SshFiles,
+) -> anyhow::Result<Vec<FilePlan>> {
+    let Some(secrets) = dump.secrets.as_ref().filter(|_| take_secrets(options)) else {
+        return Ok(Vec::new());
     };
-    if !take_secrets(options) {
-        return Ok(None);
-    }
-    let path = match &config.key {
-        KeyFile::Supplied(_) => return Ok(Some(SigningKeyPlan::KeptSupplied)),
-        KeyFile::Own(path) => path,
+    let own_signing_key = match &signing.key {
+        KeyFile::Own(path) => Some(path.as_path()),
+        KeyFile::Supplied(_) => None,
     };
-    if read_if_there(path)?.as_deref() == Some(key) {
-        return Ok(Some(SigningKeyPlan::Unchanged));
+    let mut plans = Vec::new();
+    if let Some(key) = &secrets.signing_key {
+        plans.push(plan_file(
+            SecretFile::SigningKey,
+            own_signing_key,
+            key,
+            || {
+                let passphrase = signing.passphrase()?;
+                let checked = aurcache_signing::InstanceKey::parse(key, passphrase.as_deref())
+                    .map_err(|e| {
+                        e.context(format!(
+                            "the dump's signing key ({SIGNING_KEY_FILE}) cannot sign here"
+                        ))
+                    })?;
+                let fingerprint = checked.fingerprint().to_string();
+                Ok(Some(Event::RestoreSigningKeyReplaced { fingerprint }))
+            },
+        )?);
     }
-    let passphrase = config.passphrase()?;
-    let checked =
-        aurcache_signing::InstanceKey::parse(key, passphrase.as_deref()).map_err(|e| {
-            e.context(format!(
-                "the dump's signing key ({SIGNING_KEY_FILE}) cannot sign here"
-            ))
-        })?;
-    Ok(Some(SigningKeyPlan::Replace {
-        path: path.clone(),
-        fingerprint: checked.fingerprint().to_string(),
-    }))
+    if let Some(key) = &secrets.ssh_key {
+        plans.push(plan_file(SecretFile::SshKey, ssh.key.own(), key, || {
+            let public = crate::ssh::public_half(key)
+                .with_context(|| format!("the dump's SSH key ({SSH_KEY_FILE}) cannot be used"))?;
+            let fingerprint = public.fingerprint(ssh_key::HashAlg::Sha256).to_string();
+            Ok(Some(Event::RestoreSshKeyReplaced { fingerprint }))
+        })?);
+    }
+    if let Some(hosts) = &secrets.known_hosts {
+        let own = ssh.known_hosts.own();
+        plans.push(plan_file(SecretFile::KnownHosts, own, hosts, || Ok(None))?);
+    }
+    Ok(plans)
+}
+
+/// Only a file that will be written is checked, so a dump is never refused
+/// over a file that the restore leaves alone.
+fn plan_file(
+    file: SecretFile,
+    own: Option<&Path>,
+    content: &[u8],
+    check: impl FnOnce() -> anyhow::Result<Option<Event>>,
+) -> anyhow::Result<FilePlan> {
+    let action = match own {
+        None => FileAction::KeptSupplied,
+        Some(path) if read_if_there(path)?.as_deref() == Some(content) => FileAction::Unchanged,
+        Some(path) => FileAction::Replace {
+            path: path.to_path_buf(),
+            content: content.to_vec(),
+            event: check()?,
+        },
+    };
+    Ok(FilePlan { file, action })
 }
 
 /// The old file is kept beside the new one under a hash of its bytes, so a
 /// name always means one content and no copy overwrites a different one.
-fn replace_signing_key(path: &Path, key: &[u8]) -> anyhow::Result<()> {
-    use anyhow::Context;
+fn replace_file(path: &Path, content: &[u8]) -> anyhow::Result<()> {
     use aurcache_common::fs::write_private;
 
     if let Some(old) = read_if_there(path)? {
@@ -611,9 +668,9 @@ fn replace_signing_key(path: &Path, key: &[u8]) -> anyhow::Result<()> {
         ));
         let kept = PathBuf::from(kept);
         write_private(&kept, &old)
-            .with_context(|| format!("keeping the old key as {}", kept.display()))?;
+            .with_context(|| format!("keeping the old file as {}", kept.display()))?;
     }
-    write_private(path, key).with_context(|| format!("replacing {}", path.display()))
+    write_private(path, content).with_context(|| format!("replacing {}", path.display()))
 }
 
 /// What pass 1 did.

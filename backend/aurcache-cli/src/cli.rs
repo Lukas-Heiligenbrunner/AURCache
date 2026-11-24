@@ -146,9 +146,9 @@ pub(crate) struct RestoreArgs {
     /// package, setting and worker this instance has is removed first.
     #[arg(long)]
     pub(crate) clear: bool,
-    /// Take the dump's CA, worker certificates, token hashes and signing key.
-    /// Replacing the CA invalidates every certificate this server's workers
-    /// hold; a replaced signing key signs from the server's next start.
+    /// Take the dump's CA, worker certificates, token hashes, signing key and
+    /// SSH files. Replacing the CA invalidates every certificate this server's
+    /// workers hold; a replaced signing key signs from the server's next start.
     #[arg(long, value_enum, default_value_t = Secrets::Ignore)]
     pub(crate) secrets: Secrets,
 }
@@ -876,7 +876,7 @@ pub(crate) struct RawArgs {
 /// What an import should do about the dump's secrets.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
 pub(crate) enum Secrets {
-    /// Leave this server's CA, tokens and signing key alone.
+    /// Leave this server's CA, tokens, signing key and SSH files alone.
     Ignore,
     /// Take the dump's, replacing what is here.
     Copy,
