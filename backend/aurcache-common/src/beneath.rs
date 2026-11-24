@@ -88,18 +88,16 @@ impl Dir {
     }
 
     /// The names directly in this directory, `.` and `..` left out, in no
-    /// particular order.
-    pub fn names(&self) -> io::Result<Vec<OsString>> {
+    /// particular order, read one at a time.
+    pub fn names(&self) -> io::Result<impl Iterator<Item = io::Result<OsString>> + '_> {
         let entries = rustix::fs::Dir::read_from(&self.fd).map_err(|e| self.error(e))?;
-        let mut names = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| self.error(e))?;
-            let name = OsStr::from_bytes(entry.file_name().to_bytes());
-            if name != "." && name != ".." {
-                names.push(name.to_os_string());
+        Ok(entries.filter_map(move |entry| match entry {
+            Ok(entry) => {
+                let name = OsStr::from_bytes(entry.file_name().to_bytes());
+                (name != "." && name != "..").then(|| Ok(name.to_os_string()))
             }
-        }
-        Ok(names)
+            Err(e) => Some(Err(self.error(e))),
+        }))
     }
 
     /// The path this directory was opened as, for messages.
@@ -205,7 +203,8 @@ mod tests {
         let out = Dir::open(tmp.path()).unwrap().dir("out").unwrap();
         assert_eq!(out.read("report.json", 2).unwrap(), b"{}");
         assert_eq!(out.path(), tmp.path().join("out"));
-        assert_eq!(out.names().unwrap(), ["report.json"]);
+        let names: std::io::Result<Vec<_>> = out.names().unwrap().collect();
+        assert_eq!(names.unwrap(), ["report.json"]);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result};
 use aurcache_build_agent::layout::{BIN_NAME, OUT_DIR, REPORT_FILE, Work};
-use aurcache_build_agent::report::BuildReport;
+use aurcache_build_agent::report::{BuildReport, REPORT_LIMIT};
 use aurcache_build_agent::spec::BuildSpec;
 use aurcache_common::beneath;
 use aurcache_worker_container::input;
@@ -22,9 +22,6 @@ use std::path::Path;
 use std::process::Stdio;
 
 use crate::container::BIN_DIR;
-
-/// The most a report may be: a few lines, and a commit per VCS source.
-pub const REPORT_LIMIT: u64 = 1 << 20;
 
 /// What the agent left at `out/report.json`.
 #[derive(Debug, PartialEq)]

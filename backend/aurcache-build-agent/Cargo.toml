@@ -24,8 +24,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 clap = { version = "4.6.7", features = ["derive"] }
 libc = "0.2.191"
-# The types only: no database, filesystem or clock helpers.
-aurcache-common = { path = "../aurcache-common", default-features = false, features = ["fs"] }
+# No database or clock helpers: the types, and the filesystem helpers the agent shares.
+aurcache-common = { path = "../aurcache-common", default-features = false, features = ["fs", "beneath"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

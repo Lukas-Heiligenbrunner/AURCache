@@ -6,6 +6,7 @@
 //! consumer can take `default-features = false` and still get the types.
 
 pub mod api;
+pub mod artifact;
 /// Requires the `beneath` feature.
 #[cfg(feature = "beneath")]
 pub mod beneath;

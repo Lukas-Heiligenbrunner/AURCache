@@ -1,10 +1,15 @@
-//! What the agent hands back: how the build ended and what it measured.
+//! What the agent hands back: how the build ended, what it measured, and,
+//! for a worker that reaches the container only through `exec`, the packages
+//! it left.
 //!
 //! Within one [`INTERFACE`](crate::spec::INTERFACE) these types only gain
 //! optional fields; anything else is the next interface.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// The most a report may be: a few lines, and a commit per VCS source.
+pub const REPORT_LIMIT: u64 = 1 << 20;
 
 /// `<work>/out/report.json`, written last, once nothing the build started is
 /// still running.
@@ -75,4 +80,23 @@ pub enum SetupStep {
     Makepkg,
     /// Taking the worker's SSH link, or giving the build its socket.
     Credential,
+}
+
+/// What `manifest` prints.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Handback {
+    pub interface: u32,
+    /// `None` when there is no report that can be read.
+    pub report: Option<BuildReport>,
+    /// The build log's length in bytes, `None` when there is none that can
+    /// be read: how a worker that follows the log knows it has all of it.
+    pub log_size: Option<u64>,
+    pub artifacts: Vec<Artifact>,
+}
+
+/// One regular file in `<work>/pkg/` whose name `is_artifact` accepts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    pub name: String,
+    pub size: u64,
 }
