@@ -83,6 +83,14 @@ cd docs && yarn install --frozen-lockfile && yarn build
 # container's flags (docker, ~3 min; needs python3, git and OpenSSH)
 ./scripts/test-build-agent.sh
 
+# the Kubernetes worker in a throwaway kind cluster (kind, kubectl, docker,
+# jq, curl, cargo, python3 and ssh-keygen; ~20 min and ~10 GB, so point
+# TMPDIR or E2E_SCRATCH at a disk with room)
+./tests/e2e/topologies/kube/run.sh hello
+E2E_BIG=0 ./tests/e2e/topologies/kube/run.sh      # without the 2 GiB package
+KEEP=1 ./tests/e2e/topologies/kube/run.sh         # leave the cluster up to look into it
+E2E_SKIP_BUILD=1 E2E_LEGS="restart stop" ./tests/e2e/topologies/kube/run.sh   # some legs, same images
+
 # build the Arch packages from this tree (and optionally install them)
 ./scripts/build-packages.sh --install
 ./scripts/build-packages.sh --packages aurcache-server
@@ -120,6 +128,10 @@ they cover, rather than running all of them as a matter of course:
   host's Docker socket: for changes to how the builder shares its build
   directory with a daemon outside the container. `E2E_BUILD_DIR` names that
   directory, which is under `/tmp` otherwise.
+- `tests/e2e/topologies/kube/run.sh`, the kind suite — for changes to
+  `aurcache-worker-kube`, the manifests in `kubernetes/kube-worker/`, the
+  kube-worker image, or the agent's exec subcommands. Its last leg runs
+  `aurcache-worker-kube`'s `#[ignore]`d `tests/live.rs` against the cluster.
 - `test-sandbox.sh` — only for changes to `aurcache-sandbox`, the PKGBUILD
   sourcing path, or how the patched makechrootpkg upgrades a build's system.
 - `test-signed-repo.sh` — for changes to signing (`aurcache-signing`, or how

@@ -1,0 +1,7 @@
+# The test's own pieces: the git servers, and the control pod of the
+# NetworkPolicy check, which reaches what builds may not because no policy
+# selects anything here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-e2e

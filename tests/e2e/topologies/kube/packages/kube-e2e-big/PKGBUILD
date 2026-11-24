@@ -1,0 +1,19 @@
+# A package of 2 GiB of random bytes, which no compressor shrinks: for
+# streaming a package past 2^31 bytes from a build to the server, and
+# measuring what that costs the worker in between.
+#
+# The bytes are written straight into the package directory, so the build
+# holds them once before makepkg archives them, not twice.
+pkgname=kube-e2e-big
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Kubernetes worker test: 2 GiB of incompressible data"
+arch=('x86_64' 'aarch64' 'armv7h')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+options=('!strip' '!debug')
+
+package() {
+  install -d "${pkgdir}/usr/share/kube-e2e-big"
+  head -c 2G /dev/urandom > "${pkgdir}/usr/share/kube-e2e-big/data"
+}

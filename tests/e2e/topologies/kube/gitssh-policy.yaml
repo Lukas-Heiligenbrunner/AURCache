@@ -1,0 +1,25 @@
+# Builds reach nothing in the cluster but the server's repository; this lets
+# them reach the SSH git server of gitssh.yaml too, as a deployment with a
+# private git server would.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kube-e2e-builds-to-gitssh
+  namespace: aurcache-builds
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: aurcache-worker-kube
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-e2e
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kube-e2e-gitssh
+      ports:
+        - protocol: TCP
+          port: 22

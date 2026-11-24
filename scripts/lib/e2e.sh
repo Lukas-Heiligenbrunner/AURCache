@@ -114,8 +114,9 @@ filter_noise() {
 }
 
 # The newest build of package `$1`, as `<pkgbase>/<number>`; empty if none.
+# Filtered by the server: the newest 20 of all builds may not include this package's.
 latest_build_ref() {
-    aurcache_cli --format json builds list --limit 20 2>/dev/null \
+    aurcache_cli --format json builds list --package "$1" --limit 20 2>/dev/null \
         | jq -r --arg pkg "$1" \
             '[.[] | select(.pkg_name == $pkg)] | max_by(.number) // empty | "\(.pkg_name)/\(.number)"' \
             2>/dev/null || true
@@ -156,20 +157,18 @@ dump_logs_on_failure() {
     echo "    Full build log: $CLI_BIN builds output ${build_ref:-<pkgbase>/<number>}"
 }
 
+# Whether to tear down after an exit with status `$1`, by the policy above.
+cleanup_wanted() {
+    case "${CLEANUP:-}" in
+        1) return 0 ;;
+        0) return 1 ;;
+        *) [ "$1" -eq 0 ] ;;
+    esac
+}
+
 cleanup() {
     local exit_code=$?
-    local do_cleanup
-    if [ "${CLEANUP:-}" = "1" ]; then
-        do_cleanup=1
-    elif [ "${CLEANUP:-}" = "0" ]; then
-        do_cleanup=0
-    elif [ "$exit_code" -eq 0 ]; then
-        do_cleanup=1
-    else
-        do_cleanup=0
-    fi
-
-    if [ "$do_cleanup" = "0" ]; then
+    if ! cleanup_wanted "$exit_code"; then
         echo "=== Leaving containers up (exit $exit_code) ==="
         echo "    Full logs:  $LOG_FILE"
         echo "    Inspect:    docker compose ${COMPOSE_ARGS[*]} logs -f"
