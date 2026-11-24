@@ -303,7 +303,9 @@ impl<C: Cluster> KubeExecutor<C> {
                     tracing::warn!("build {}: the SSH link: {error:#}", build.claimed.job.build_id);
                 },
                 changed = status.changed() => changed?,
-                never = &mut follow => match never {},
+                // Not before: an exec into a pod whose containers have not
+                // started fails, and kube logs each failure as an error.
+                never = &mut follow, if started => match never {},
                 () = tokio::time::sleep_until(started_by), if !started => {
                     return Ok(unstarted(&status.said.clone().unwrap_or_default()));
                 }
