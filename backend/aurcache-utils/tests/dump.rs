@@ -9,6 +9,7 @@ use aurcache_db::prelude::Packages;
 use aurcache_db::{packages, settings, workers};
 use aurcache_utils::dump::{SecretSources, build_dump, write_archive};
 use aurcache_utils::services::Services;
+use aurcache_utils::snapshot::SnapshotStore;
 use aurcache_utils::ssh::{HostKeySource, KeySource, SshFiles};
 use flate2::read::GzDecoder;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
@@ -36,6 +37,17 @@ fn supplied_ssh(dir: &std::path::Path) -> SshFiles {
 /// A repository of its own for a restore that publishes nothing new.
 fn test_repo() -> aurcache_utils::repository::Repository {
     aurcache_utils::repository::Repository::new(tempfile::tempdir().unwrap().keep())
+}
+
+/// A store whose AUR is a local directory holding `hello`, so that a restore
+/// reads that package's source without the network.
+fn store_with_hello() -> Arc<SnapshotStore> {
+    let aur = tempfile::tempdir().unwrap().keep();
+    git_package(&aur.join("hello.git"), "hello", &[]);
+    Arc::new(SnapshotStore::with_checkout_root_and_aur_base(
+        tempfile::tempdir().unwrap().keep(),
+        aur.to_string_lossy(),
+    ))
 }
 
 async fn package(
@@ -1133,9 +1145,7 @@ async fn restoring_does_not_touch_the_ca_unless_asked() {
     let target_ca = tempfile::tempdir().unwrap();
     std::fs::write(target_ca.path().join("ca-key.pem"), "MINE").unwrap();
 
-    let store = std::sync::Arc::new(aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
-        tempfile::tempdir().unwrap().keep(),
-    ));
+    let store = store_with_hello();
     // Drained only after `apply` returns, so the bound must exceed the
     // dump's entries; production recorders drain live on the smaller
     // shared bound.
@@ -1202,9 +1212,7 @@ async fn copying_secrets_replaces_the_ca_and_protects_the_key() {
     let target_ca = tempfile::tempdir().unwrap();
     std::fs::write(target_ca.path().join("ca-key.pem"), "MINE").unwrap();
 
-    let store = std::sync::Arc::new(aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
-        tempfile::tempdir().unwrap().keep(),
-    ));
+    let store = store_with_hello();
     // Drained only after `apply` returns, so the bound must exceed the
     // dump's entries; production recorders drain live on the smaller
     // shared bound.
@@ -1732,9 +1740,7 @@ async fn restore_with(
     let TestClient { client, _repos } = client_with_empty_official_repos().await;
     let services = Services {
         db: target.clone(),
-        store: Arc::new(aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
-            tempfile::tempdir().unwrap().keep(),
-        )),
+        store: store_with_hello(),
         client: Arc::new(client),
         repo: Arc::new(test_repo()),
         activity: writer.log,
