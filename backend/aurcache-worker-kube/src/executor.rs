@@ -147,13 +147,10 @@ impl<C: Cluster> KubeExecutor<C> {
         pod: &Pod,
         mut build: Build<'_, U>,
     ) -> Result<CompleteReport> {
-        let watch = build.claimed.watch();
         let name = pod::name(&cfg.dispatcher, build.claimed.job.build_id);
         let input = std::mem::take(&mut build.input);
         let lines = Mutex::new(Lines::default());
-        let attended = self
-            .attend(cfg, pod, &name, &build, input, &lines, &watch)
-            .await;
+        let attended = self.attend(cfg, pod, &name, &build, input, &lines).await;
         flush(&lines, &build.log).await;
         self.delete(&name).await;
         attended
@@ -178,7 +175,6 @@ impl<C: Cluster> KubeExecutor<C> {
     ///
     /// A timeout bounds the build itself: once the build container has ended
     /// it no longer applies, and only a cancellation stops the hand-back.
-    #[allow(clippy::too_many_arguments)]
     async fn attend<U: Uploads>(
         &self,
         cfg: &Config,
@@ -187,8 +183,8 @@ impl<C: Cluster> KubeExecutor<C> {
         build: &Build<'_, U>,
         input: Packed,
         lines: &Mutex<Lines>,
-        watch: &StopWatch,
     ) -> Result<CompleteReport> {
+        let watch = &build.claimed.watch();
         // A build stopped before it has a pod gets none.
         if build.claimed.cancel.is_cancelled() {
             return Ok(stopped(Stop::Canceled, watch));
