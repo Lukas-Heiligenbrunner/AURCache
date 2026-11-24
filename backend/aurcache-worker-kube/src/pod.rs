@@ -41,8 +41,8 @@ const DEADLINE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// The timeout assumed for a build that has none.
 const UNTIMED_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
 
-const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
-const LABEL_DISPATCHER: &str = "aurcache.io/dispatcher";
+pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
+pub const LABEL_DISPATCHER: &str = "aurcache.io/dispatcher";
 const LABEL_BUILD: &str = "aurcache.io/build-id";
 const LABEL_ARCH: &str = "aurcache.io/arch";
 const NODE_OS: &str = "kubernetes.io/os";

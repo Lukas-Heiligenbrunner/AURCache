@@ -1085,6 +1085,7 @@ dependencies = [
  "aurcache-common",
  "aurcache-worker-container",
  "aurcache-worker-core",
+ "bytes",
  "futures",
  "k8s-openapi",
  "kube",
