@@ -1,5 +1,10 @@
 //! Arch Linux architectures in the vocabulary of container images.
 
+/// The architectures that the server builds for and that the container
+/// images are published for: `pacman_mirrors::Platform::ALL`, spelled out
+/// because that crate would bring a database driver with it.
+pub const ARCHES: [&str; 3] = ["x86_64", "aarch64", "armv7h"];
+
 /// An Arch architecture in the OCI vocabulary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Platform {

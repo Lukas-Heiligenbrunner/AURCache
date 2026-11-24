@@ -7,6 +7,7 @@
 
 use crate::settings::keys;
 use anyhow::Result;
+use aurcache_worker_container::arch::ARCHES;
 use aurcache_worker_container::ssh::CredentialFiles;
 use aurcache_worker_core::config::{CoreConfig, env_opt};
 use aurcache_worker_core::settings::WorkerSettings;
@@ -51,10 +52,6 @@ pub struct Tunables {
     pub memory_limit: i64,
 }
 
-/// The platforms the server builds for: `pacman_mirrors::Platform::ALL`,
-/// spelled out because that crate would bring a database driver with it.
-const PLATFORMS: [&str; 3] = ["x86_64", "aarch64", "armv7h"];
-
 /// The default builder image: `aurcache-builder-v2`, not `aurcache-builder`,
 /// which is made for building with paru.
 const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest";
@@ -72,7 +69,7 @@ pub fn core_from_env() -> CoreConfig {
     // binfmt runs a foreign one. Checking for the handlers instead would
     // stop builds that used to work, since a container rarely sees them.
     if env_opt("WORKER_ARCHES").is_none() {
-        core.arches = PLATFORMS.iter().map(ToString::to_string).collect();
+        core.arches = ARCHES.iter().map(ToString::to_string).collect();
     }
     core
 }

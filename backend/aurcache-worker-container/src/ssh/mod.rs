@@ -90,6 +90,22 @@ mod tests {
         );
     }
 
+    /// Host keys that cannot be read fail with the file's name.
+    #[tokio::test]
+    async fn host_keys_that_cannot_be_read_name_the_file() {
+        let files = CredentialFiles {
+            key: "/nonexistent/key".into(),
+            known_hosts: "/nonexistent/known_hosts".into(),
+        };
+        let Err(error) = files.load().await else {
+            panic!("loaded host keys that are not there");
+        };
+        assert!(
+            format!("{error:#}").contains("/nonexistent/known_hosts"),
+            "{error:#}"
+        );
+    }
+
     #[test]
     fn a_key_comes_with_its_host_keys_or_not_at_all() {
         let named = |key: Option<&str>, hosts: Option<&str>| {
