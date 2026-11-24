@@ -468,7 +468,8 @@ impl WorkerClient {
                 "source",
             )
             .await?;
-        Ok(resp.bytes().await.context("reading source")?.to_vec())
+        // Avoids a copy of the body where it can: a source can be large.
+        Ok(resp.bytes().await.context("reading source")?.into())
     }
 
     /// Append a chunk of build log output.

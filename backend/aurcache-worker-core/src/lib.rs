@@ -6,8 +6,9 @@
 //! [`Executor`](executor::Executor), implemented once per build strategy in its
 //! own crate.
 //!
-//! `aurcache-worker` builds each package in a `devtools` chroot, and
-//! `aurcache-worker-docker` in a container it asks a Docker daemon for.
+//! `aurcache-worker` builds each package in a `devtools` chroot,
+//! `aurcache-worker-docker` in a container it asks a Docker daemon for, and
+//! `aurcache-worker-kube` in a pod.
 //!
 //! See `design/implemented/remote-workers.md`.
 

@@ -7,6 +7,10 @@ edition = "2024"
 # at Pod Security `baseline`, and streams the packages from the pod to the
 # server without storing them.
 
+[[bin]]
+name = "aurcache-worker-kube"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
@@ -34,5 +38,6 @@ aurcache-build-agent = { path = "../aurcache-build-agent" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+bytes = "1.12.2"
 # Paused time.
 tokio = { workspace = true, features = ["full", "test-util"] }
