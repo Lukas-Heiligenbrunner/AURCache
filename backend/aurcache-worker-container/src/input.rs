@@ -2,6 +2,7 @@
 //! them.
 
 use anyhow::{Context, Result};
+use aurcache_build_agent::handin::prefix;
 use aurcache_build_agent::layout::{INPUT_SOURCE, INPUT_SPEC, Work};
 use aurcache_build_agent::spec::BuildSpec;
 use aurcache_common::fs::write_public;
@@ -15,6 +16,33 @@ pub fn write(work: &Path, spec: &BuildSpec, source: &[u8]) -> Result<()> {
     fs::create_dir_all(&input).with_context(|| format!("creating {}", input.display()))?;
     put(&input.join(INPUT_SPEC), &to_json(spec)?)?;
     put(&input.join(INPUT_SOURCE), source)
+}
+
+/// The same two as the stream that the agent's `receive` reads, for a worker
+/// that reaches its build container only through `exec`. `source` is moved
+/// in, never copied.
+pub fn pack(spec: &BuildSpec, source: Vec<u8>) -> Result<Packed> {
+    let spec = to_json(spec)?;
+    let mut head = prefix(spec.len()).into_bytes();
+    head.extend_from_slice(&spec);
+    head.extend_from_slice(prefix(source.len()).as_bytes());
+    Ok(Packed { head, source })
+}
+
+/// The stream `receive` reads, in two pieces written one after the other.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Packed {
+    /// The spec, and the source's length.
+    pub head: Vec<u8>,
+    pub source: Vec<u8>,
+}
+
+impl Packed {
+    /// The pieces, in the order they are written.
+    #[must_use]
+    pub fn pieces(&self) -> [&[u8]; 2] {
+        [&self.head, &self.source]
+    }
 }
 
 fn to_json(spec: &BuildSpec) -> Result<Vec<u8>> {
@@ -70,6 +98,22 @@ mod tests {
             .collect();
         listed.sort();
         assert_eq!(listed, [INPUT_SOURCE, INPUT_SPEC]);
+    }
+
+    #[test]
+    fn pack_is_the_spec_then_the_source_each_after_its_length() {
+        let packed = pack(&spec(), b"source".to_vec()).unwrap();
+        let stream = packed.pieces().concat();
+        let mut reader = stream.as_slice();
+        let len = aurcache_build_agent::handin::read_len(&mut reader).unwrap();
+        let (json, mut rest) = reader.split_at(usize::try_from(len).unwrap());
+        assert_eq!(serde_json::from_slice::<BuildSpec>(json).unwrap(), spec());
+        assert_eq!(
+            aurcache_build_agent::handin::read_len(&mut rest).unwrap(),
+            6
+        );
+        assert_eq!(rest, b"source");
+        assert_eq!(packed.source, b"source");
     }
 
     #[test]

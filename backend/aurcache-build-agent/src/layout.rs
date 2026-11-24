@@ -23,6 +23,8 @@ pub const INPUT_SOURCE: &str = "source.tar.gz";
 pub const PKG_DIR: &str = "pkg";
 pub const OUT_DIR: &str = "out";
 pub const REPORT_FILE: &str = "report.json";
+pub const LOG_DIR: &str = "log";
+pub const LOG_FILE: &str = "build.log";
 
 /// The directory a worker gives the agent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +56,20 @@ impl Work {
     #[must_use]
     pub fn source(&self) -> PathBuf {
         self.input().join(INPUT_SOURCE)
+    }
+
+    /// `<root>/in/ready`: there once the job is handed in whole, holding the
+    /// id of the process that received it.
+    #[must_use]
+    pub fn ready(&self) -> PathBuf {
+        self.input().join("ready")
+    }
+
+    /// `<root>/log/build.log`: the build log, for a worker that follows it
+    /// as a file.
+    #[must_use]
+    pub fn log(&self) -> PathBuf {
+        self.0.join(LOG_DIR).join(LOG_FILE)
     }
 
     /// `<root>/pkg`: makepkg's `PKGDEST`, what the worker collects.
@@ -160,6 +176,8 @@ mod tests {
         assert_eq!(work.input(), Path::new("/work/in"));
         assert_eq!(work.spec(), Path::new("/work/in/spec.json"));
         assert_eq!(work.source(), Path::new("/work/in/source.tar.gz"));
+        assert_eq!(work.ready(), Path::new("/work/in/ready"));
+        assert_eq!(work.log(), Path::new("/work/log/build.log"));
         assert_eq!(work.pkg(), Path::new("/work/pkg"));
         assert_eq!(work.out(), Path::new("/work/out"));
         assert_eq!(work.report(), Path::new("/work/out/report.json"));

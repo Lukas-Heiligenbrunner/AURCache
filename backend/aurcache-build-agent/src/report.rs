@@ -1,4 +1,6 @@
-//! What the agent hands back: how the build ended and what it measured.
+//! What the agent hands back: how the build ended, what it measured, and,
+//! for a worker that reaches the container only through `exec`, the packages
+//! it left.
 //!
 //! Within one [`INTERFACE`](crate::spec::INTERFACE) these types only gain
 //! optional fields; anything else is the next interface.
@@ -75,4 +77,20 @@ pub enum SetupStep {
     Makepkg,
     /// Taking the worker's SSH link, or giving the build its socket.
     Credential,
+}
+
+/// What `manifest` prints.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Handback {
+    pub interface: u32,
+    /// `None` when the build container ended without writing one.
+    pub report: Option<BuildReport>,
+    pub artifacts: Vec<Artifact>,
+}
+
+/// One regular file in `<work>/pkg/`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    pub name: String,
+    pub size: u64,
 }
