@@ -18,6 +18,9 @@ being a compatibility path.
 
 Related:
 
+- `kubernetes-executor.md`: the Kubernetes worker, which builds on all of
+  this, and the spike that showed how little a build container needs ("Pod
+  Security `baseline` for builds").
 - `design/proposed/build-runner.md`: the same move for the chroot worker (the
   PKGBUILD only ever runs inside the build's own container, from inputs that
   are data), which has not been made yet.
@@ -346,9 +349,9 @@ pub enum Ended {
 }
 ```
 
-A container that ends with no report was killed whole (out of memory, with
-`memory.oom.group`; the node; the operator), and the worker hands the build
-back as interrupted, with the engine's exit status.
+A container that ends with no report was killed whole. Out of memory (with
+`memory.oom.group`) the build fails; killed by the node or the operator, it
+is handed back as interrupted, with the engine's exit status.
 
 ### The SSH link
 
