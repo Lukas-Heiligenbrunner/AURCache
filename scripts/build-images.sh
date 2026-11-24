@@ -14,15 +14,18 @@
 #                paru it ships, which this image does not have.
 #   demo-worker  aurcache-demo-worker: the dummy worker for demo instances,
 #                synthetic packages and no build. Debian, like the server.
+#   kube-worker  aurcache-worker-kube: the Kubernetes worker's dispatcher, and
+#                the build agent that its build pods take from it. Debian, like
+#                the server.
 #
 # The worker and hybrid images are two targets of docker/arch.Dockerfile. They
 # install AURCache as Arch packages, which its packager stage cross-compiles on
 # the build host, once for both; only their runtime stages are
 # per-architecture, so an emulated build spends its time on `pacman -U` rather
-# than on cargo. The server image is Debian and cross-compiles through
-# build-rust.sh. The demo-worker image is Debian too but builds natively per
-# platform, which under emulation is slow rather than wrong (see
-# docker/demo-worker.Dockerfile).
+# than on cargo. The server and kube-worker images are Debian and
+# cross-compile through build-rust.sh. The demo-worker image is Debian too but
+# builds natively per platform, which under emulation is slow rather than
+# wrong (see docker/demo-worker.Dockerfile).
 #
 #   scripts/build-images.sh docker.example.com
 #   scripts/build-images.sh --push --tag v0.5.0 --tag latest docker.example.com
@@ -56,7 +59,8 @@ usage() {
 Options:
   -t, --tag TAG             Image tag; repeat for several (default: latest)
   -i, --images LIST         Comma-separated: server, worker, hybrid, builder,
-                            demo-worker (default: server, worker, hybrid)
+                            demo-worker, kube-worker (default: server,
+                            worker, hybrid)
   -p, --platforms LIST      Target platforms (default: linux/amd64,linux/arm64,linux/arm/v7)
       --push                Push to the registry; without it the images are
                             built and discarded (see the note below)
@@ -138,6 +142,7 @@ declare -A IMAGE_NAMES=(
     [hybrid]=aurcache
     [builder]=aurcache-builder-v2
     [demo-worker]=aurcache-demo-worker
+    [kube-worker]=aurcache-worker-kube
 )
 # The Dockerfile each is built from, and the stage, for the two that share one.
 declare -A DOCKERFILES=(
@@ -146,6 +151,7 @@ declare -A DOCKERFILES=(
     [hybrid]=docker/arch.Dockerfile
     [builder]=docker/builder.Dockerfile
     [demo-worker]=docker/demo-worker.Dockerfile
+    [kube-worker]=docker/kube-worker.Dockerfile
 )
 declare -A TARGETS=(
     [worker]=worker
@@ -156,7 +162,7 @@ IFS=',' read -r -a selected <<<"$images"
 packaged=0
 for image in "${selected[@]}"; do
     if [[ -z ${IMAGE_NAMES[$image]:-} ]]; then
-        echo "error: unknown image '$image' (expected server, worker, hybrid, builder or demo-worker)" >&2
+        echo "error: unknown image '$image' (expected server, worker, hybrid, builder, demo-worker or kube-worker)" >&2
         exit 2
     fi
     [[ -n ${TARGETS[$image]:-} ]] && packaged=1
@@ -235,8 +241,8 @@ fi
 # inside (see aurcache-common's build script). Outside a checkout there is
 # simply nothing to pass, and the binaries report their bare release.
 #
-# Every image but the builder consumes these (the server and the demo worker
-# in their builder stages, the others in their packager stage).
+# Every image but the builder consumes these (the server, the demo worker and
+# the kube worker in their builder stages, the others in their packager stage).
 version_args=()
 if sha=$(git rev-parse HEAD 2>/dev/null); then
     version_args+=(--build-arg "LATEST_COMMIT_SHA=$sha")
@@ -247,7 +253,7 @@ if sha=$(git rev-parse HEAD 2>/dev/null); then
         version_args+=(--build-arg "AURCACHE_GIT_DIRTY=1")
     fi
 fi
-if [[ $platforms == *arm/v7* ]] && [[ -z $toolchain_repo ]]; then
+if (( packaged )) && [[ $platforms == *arm/v7* ]] && [[ -z $toolchain_repo ]]; then
     echo "note: building armv7 without --toolchain-repo; the cross toolchain is"
     echo "      built from the AUR and takes roughly an hour the first time."
 fi

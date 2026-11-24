@@ -57,7 +57,7 @@ WORKDIR /app/backend
 ARG TARGETPLATFORM
 COPY docker/build-rust.sh packaging/common.sh /root/
 RUN --mount=type=cache,target=/opt/cargo-cache,id=cargo-downloads-root \
-    bash /root/build-rust.sh "$TARGETPLATFORM"
+    bash /root/build-rust.sh "$TARGETPLATFORM" server
 
 # No `--platform` here: buildx already builds this stage for the target, and
 # pinning it to a build arg meant the runtime base and the binary above could

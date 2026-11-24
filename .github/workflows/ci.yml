@@ -114,7 +114,8 @@ jobs:
           # The build agent, which packaging/common.sh builds alone beside the
           # Docker worker's package.
           cargo check -p aurcache-build-agent
-          # docker/build-rust.sh (docker/server.Dockerfile)
+          # docker/build-rust.sh (server.Dockerfile, kube-worker.Dockerfile)
+          cargo check -p aurcache-worker-kube
           cargo check --features static
 
       # `aurcache-common` exists so a browser frontend can share the API shapes

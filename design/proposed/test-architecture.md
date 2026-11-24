@@ -84,7 +84,7 @@ scratch.
 | PR | Test additions |
 |---|---|
 | #435 | `aurcache-utils/tests/ssh_clone.rs` (server clones over SSH from a throwaway `sshd`, per push); a third `test-e2e-ssh.sh` phase for the same server-side clone through the API; `docker/testpkg/ssh-source-fixture/`; changes to `git-ssh.Dockerfile` and its entrypoint |
-| #438 | The Kubernetes worker: `kubernetes/kube-worker/`, `docker/kube-worker.Dockerfile`, `docker/build-kube-worker.sh`. Built on #446, whose test additions it carries. |
+| #438 | The Kubernetes worker: `kubernetes/kube-worker/`, `docker/kube-worker.Dockerfile`, `docker/build-rust.sh`. Built on #446, whose test additions it carries. |
 | #446 | `scripts/test-build-agent.sh`, a new per-push job (~3 min): the static build agent in the builder image under a build container's flags; legs: `hello` builds, a hostile build (becoming root, root's processes, the report and work directory, a dependency scriptlet's leftover process, a repository the image's upgrade must not see, a forged `--printsrcinfo`), a build killed half-way, arm64 under qemu where registered. `docker/testpkg/agent-hostile/`, `docker/testpkg/agent-thief/`. Hybrid-legacy now runs on the agent, and the Docker worker reports disk usage. |
 | #447 | `tests/e2e/topologies/kube/run.sh` (1452 lines, ~20 min locally, ~10 GB) and `e2e-kube.yml`, nightly and on a `run-e2e-kube` label. Eleven legs: enrollment, NetworkPolicy, ResourceQuota, a dependency only in AURCache's repository, SSH through the agent with a thief dependency, cancel, worker killed, worker pod deleted, pod that cannot start, a 2 GiB package, user namespaces, policy removed. Beside it in `tests/e2e/topologies/kube/`: the overlays, gitssh and five packages (`packages/`); the 2 GiB package is `tests/fixtures/packages/big/`. Deploys `kubernetes/server/` and `kubernetes/kube-worker/` as shipped: its `kustomization.yaml` names them as `../../../../kubernetes/server` and `../../../../kubernetes/kube-worker`. It is the first PR to put its files where this layout says. |
 | #450 | A `test-sandbox.sh` leg: a build is refused the socket of every ssh-agent but the one it is offered (Landlock `RESOLVE_UNIX`, Linux 7.1). A `test-e2e-ssh.sh` phase: a named key reaches only the package that names it, and a key the worker lacks is built without. Another: a named key whose file a build could read stops the worker from starting (one more stack cycle, which never builds). The same leg with the policy at `0600 root`: the sandbox, asked as the build user, answers `no-resolve-unix: bad policy`. Unit tests for the key name a job carries, the offer, the named-key list, the key-file check and the gate. |
@@ -377,7 +377,7 @@ deploy/                           running AURCache
 images/                           the product's container images (today's docker/)
   server.Dockerfile  arch.Dockerfile  builder.Dockerfile  demo-worker.Dockerfile
   kube-worker.Dockerfile          from #438
-  entrypoints, build-time scripts (build-rust.sh, build-kube-worker.sh, ...),
+  entrypoints, build-time scripts (build-rust.sh, ...),
   podman and pacman config
   build.sh                        today's scripts/build-images.sh
 packaging/                        the Arch packages: AUR submodules, units, install-files.sh,

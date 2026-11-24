@@ -140,7 +140,7 @@ _aurcache_ships_agent() {
 
 # Build the build agent for the target triple `$1`, linked statically against
 # glibc, and leave it in $(_aurcache_release_dir) beside the other binaries.
-# Run from _aurcache_cargo_build, in the environment it set up.
+# Run in an environment set up for cross-compiling to `$1`.
 #
 # Static because it runs inside build containers whose image is not the
 # worker's, so it cannot rely on their libc. `--target` is what keeps
@@ -151,12 +151,19 @@ _aurcache_ships_agent() {
 # binaries', and in a shared one each build would recompile the dependencies
 # both use.
 _aurcache_build_agent() {
-    local target=$1 release
+    local target=$1 release built headers
     release=$(_aurcache_release_dir) || return 1
+    built=target/agent/$target/release/aurcache-build-agent
 
     CARGO_TARGET_DIR=target/agent \
         RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
         cargo build --frozen --release --target "$target" -p aurcache-build-agent || return 1
-    install -Dm755 "target/agent/$target/release/aurcache-build-agent" \
-        "$release/aurcache-build-agent"
+    # A dynamic executable names a program interpreter, which a build's
+    # container may not have.
+    headers=$(readelf --program-headers "$built") || return 1
+    if [[ $headers == *INTERP* ]]; then
+        printf 'aurcache: the build agent is not statically linked\n' >&2
+        return 1
+    fi
+    install -Dm755 "$built" "$release/aurcache-build-agent"
 }
