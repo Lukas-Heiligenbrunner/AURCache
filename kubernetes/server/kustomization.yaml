@@ -13,7 +13,10 @@ kind: Kustomization
 #   - `namespace:` in ../chroot-worker/kustomization.yaml;
 #   - the Namespace patches in ../components/chroot-workers and
 #     ../components/chroot-workers-arm64;
-#   - `metadata.namespace` in ../components/chroot-worker-egress/networkpolicy.yaml.
+#   - `metadata.namespace` in ../components/chroot-worker-egress/networkpolicy.yaml;
+#   - in ../kube-worker: the ServiceAccount and the RoleBinding subject in
+#     rbac.yaml, the namespaces, AURCACHE_URL and AURCACHE_REPO_URL in
+#     worker.yaml, and the server's namespaceSelector in networkpolicy.yaml.
 namespace: aurcache
 
 resources:

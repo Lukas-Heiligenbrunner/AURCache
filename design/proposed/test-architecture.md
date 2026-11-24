@@ -534,7 +534,7 @@ file is deleted in the step that moves its last user, never earlier.
    release (see [above](#moving-what-users-fetch-by-url) if one comes
    first). `kubernetes/` to `deploy/kubernetes/`, no copy. Follow it: the
    manifests' own comments (`kubectl apply -k kubernetes/`),
-   `kubernetes/README.md` and `kube-worker/README.md`, `README.md`'s link,
+   `kubernetes/README.md`, `README.md`'s link,
    `docs/docs/setup/kubernetes.md` and `docs/docs/workers/kubernetes.md`;
    #447's `tests/e2e/topologies/kube/kustomization.yaml`, whose
    `../../../../kubernetes/server` and `../../../../kubernetes/kube-worker`

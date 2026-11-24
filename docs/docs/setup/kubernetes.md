@@ -29,6 +29,16 @@ which distribution and storage you run.
 | Worker | How it builds | Needs |
 |---|---|---|
 | Chroot workers (`components/chroot-workers`, the default) | Each package in a clean `devtools` chroot, in a StatefulSet of privileged pods | Privileged pods, Linux 6.7+ with btrfs on their nodes, a volume per worker for its storage pool |
+| [Kubernetes worker](../workers/kubernetes.md) (`kubernetes/kube-worker/`) | Each package in a short-lived pod of its own, created by a small unprivileged pod beside the server | A namespace at Pod Security `baseline` for the build pods, and a CNI that enforces NetworkPolicy |
+
+The Kubernetes worker needs no privileged pod, no particular kernel and no
+storage pool, and keeps the `aurcache` namespace at `baseline`. It has no
+caches and no kept build trees, so every build downloads its dependencies and
+sources again. Install it with `kubectl apply -k kubernetes/server/` and then
+`kubectl apply -k kubernetes/kube-worker/`, or enable it in
+`kubernetes/kustomization.yaml` in place of the chroot workers; its
+[own page](../workers/kubernetes.md) has what the cluster needs and what a
+build can reach.
 
 The rest of this page is about the chroot workers, apart from the server
 itself. Workers can also run outside the cluster and connect to its worker

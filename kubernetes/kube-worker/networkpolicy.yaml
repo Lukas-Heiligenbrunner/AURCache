@@ -1,0 +1,77 @@
+# Builds reach DNS, the server's repository and the internet outside
+# private ranges, and nothing else. Only where the CNI enforces NetworkPolicy:
+# docs/docs/workers/kubernetes.md says how to check, and when to edit this.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aurcache-builds
+  namespace: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-builds
+    app.kubernetes.io/component: kube-worker
+spec:
+  # Every pod in the namespace, which holds nothing but builds.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # With NodeLocal DNSCache: each address in the `-localip` argument of the
+    # node-local-dns DaemonSet (a pod's resolv.conf may show only the ClusterIP).
+    # - to:
+    #     - ipBlock:
+    #         cidr: 169.254.20.10/32
+    #   ports:
+    #     - protocol: UDP
+    #       port: 53
+    #     - protocol: TCP
+    #       port: 53
+    # The server pod's repository, nginx on port 80 (not the Service's 8081);
+    # never the worker port, 8083.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aurcache
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aurcache
+              app.kubernetes.io/component: server
+      ports:
+        - protocol: TCP
+          port: 80
+    # The internet minus private ranges, kept in step with
+    # ../components/chroot-worker-egress/networkpolicy.yaml. Add to `except`
+    # whatever of your cluster is on public addresses: pods, nodes, an API
+    # server endpoint.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10     # carrier-grade NAT, used by some clusters
+              - 169.254.0.0/16    # link-local: the cloud metadata endpoint
+              - 127.0.0.0/8
+              - 0.0.0.0/8
+              - 240.0.0.0/4       # class E, which some clusters give pods
+              # - 203.0.113.0/24  # e.g. your nodes' or API endpoint's public range
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fc00::/7          # unique local
+              - fe80::/10         # link-local
+              - ::1/128
+              - 64:ff9b::/96      # NAT64: reaches IPv4, private ranges included
+              - 64:ff9b:1::/48    # local-use NAT64
