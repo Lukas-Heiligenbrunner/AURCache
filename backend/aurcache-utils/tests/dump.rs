@@ -671,7 +671,7 @@ async fn a_package_whose_source_fails_is_reported_as_failed() {
         &tempfile::tempdir().unwrap().keep(),
         loaded,
         RestoreOptions::default(),
-        None,
+        Vec::new(),
         progress_tx,
     )
     .await;
@@ -777,7 +777,7 @@ async fn a_restored_package_is_queued_to_build() {
         &tempfile::tempdir().unwrap().keep(),
         load_dump(&bytes).unwrap(),
         RestoreOptions::default(),
-        None,
+        Vec::new(),
         progress_tx,
     )
     .await;
@@ -1155,7 +1155,7 @@ async fn restoring_does_not_touch_the_ca_unless_asked() {
         target_ca.path(),
         load_dump(&bytes).unwrap(),
         RestoreOptions::default(),
-        None,
+        Vec::new(),
         progress_tx,
     )
     .await;
@@ -1227,7 +1227,7 @@ async fn copying_secrets_replaces_the_ca_and_protects_the_key() {
             secrets: aurcache_common::api::dump::SecretsPolicy::Copy,
             ..RestoreOptions::default()
         },
-        None,
+        Vec::new(),
         progress_tx,
     )
     .await;
@@ -1502,7 +1502,7 @@ async fn a_dependency_only_package_survives_the_restore() {
         &tempfile::tempdir().unwrap().keep(),
         load_dump(&bytes).unwrap(),
         RestoreOptions::default(),
-        None,
+        Vec::new(),
         progress_tx,
     )
     .await;
@@ -1565,9 +1565,10 @@ async fn a_clear_has_no_patch_to_conflict_with() {
 // The signing key
 // ---------------------------------------------------------------------------
 
-use aurcache_common::api::dump::{SecretsPolicy, SigningKeyOutcome};
+use aurcache_common::api::dump::{FileOutcome, SecretFile, SecretFileReport, SecretsPolicy};
 use aurcache_signing::{InstanceKey, KEY_FILE, KeyConfig, KeyFile};
-use aurcache_utils::restore::{SigningKeyPlan, plan_signing_key};
+use aurcache_utils::restore::{FilePlan, plan_files};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const PASSPHRASE: &str = "correct horse";
@@ -1583,19 +1584,21 @@ fn new_key(passphrase: Option<&str>) -> Vec<u8> {
 /// A dump with secrets of one package, `hello`, carrying `key` as its
 /// signing key.
 async fn dump_with_key(key: Option<&[u8]>) -> Vec<u8> {
-    let source = aurcache_db::testing::memory_db().await;
-    package(&source, "hello", true, None).await;
     let ca = tempfile::tempdir().unwrap();
-    aurcache_ca::Ca::load_or_create(ca.path()).unwrap();
     if let Some(key) = key {
         std::fs::write(ca.path().join(KEY_FILE), key).unwrap();
     }
-    write_archive(
-        &build_dump(&source, "test", Some(&secrets_in(ca.path())))
-            .await
-            .unwrap(),
-    )
-    .unwrap()
+    dump_from(ca.path()).await
+}
+
+/// A dump with secrets of one package, `hello`, from a server whose CA and
+/// SSH files are in `dir`.
+async fn dump_from(dir: &Path) -> Vec<u8> {
+    let source = aurcache_db::testing::memory_db().await;
+    package(&source, "hello", true, None).await;
+    aurcache_ca::Ca::load_or_create(dir).unwrap();
+    let dump = build_dump(&source, "test", Some(&secrets_in(dir))).await;
+    write_archive(&dump.unwrap()).unwrap()
 }
 
 /// A server whose key file, `KEY_FILE` in `ca_dir`, holds `mine` and is kept
@@ -1625,51 +1628,68 @@ fn take_secrets() -> RestoreOptions {
     }
 }
 
-/// The signing key's files in `dir`, sorted: the key, and any copy kept of one.
-fn key_files(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
+/// Every file in `dir`, by name.
+fn contents(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(dir)
         .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with(KEY_FILE))
-        .collect();
-    names.sort();
-    names
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (name, std::fs::read(entry.path()).unwrap())
+        })
+        .collect()
 }
 
-/// The name a restore keeps the old key file `bytes` under.
-fn kept_name(bytes: &[u8]) -> String {
+/// The files in `dir` named `name`, or after it, sorted: the file, and any
+/// copy kept of one.
+fn files_named(dir: &Path, name: &str) -> Vec<String> {
+    let names = contents(dir).into_keys();
+    names.filter(|found| found.starts_with(name)).collect()
+}
+
+/// The name under which a restore keeps `bytes`, the old content of `name`.
+fn kept_as(name: &str, bytes: &[u8]) -> String {
     let hash = aurcache_common::digest::sha256_hex(bytes);
-    format!("{KEY_FILE}.replaced-{}", &hash[..16])
+    format!("{name}.replaced-{}", &hash[..16])
 }
 
 /// What a whole restore did, as the route runs it.
 struct Restored {
-    outcome: Option<SigningKeyOutcome>,
+    reports: Vec<SecretFileReport>,
     /// The errors of the entries that failed.
     failures: Vec<String>,
     /// Whether `hello` was imported.
     imported: bool,
-    /// Whether the activity log recorded a replaced key.
-    recorded: bool,
+    /// The kinds of the activity log's entries.
+    recorded: Vec<String>,
 }
 
-/// Plan the key and apply `bytes` to a new instance whose CA directory is
+impl Restored {
+    /// What the restore did with the dump's `file`.
+    fn outcome(&self, file: SecretFile) -> Option<FileOutcome> {
+        let report = self.reports.iter().find(|r| r.file == file);
+        report.map(|r| r.outcome)
+    }
+
+    fn recorded(&self, kind: &str) -> bool {
+        self.recorded.iter().any(|k| k == kind)
+    }
+}
+
+/// Plan the files and apply `bytes` to a new instance whose CA directory is
 /// `ca_dir`, as the restore route does.
 async fn restore_with(
     bytes: &[u8],
     ca_dir: &Path,
     config: &KeyConfig,
+    ssh: &SshFiles,
     options: RestoreOptions,
 ) -> Restored {
     let dump = load_dump(bytes).unwrap();
-    let before = std::fs::read(ca_dir.join(KEY_FILE)).ok();
-    let plan = plan_signing_key(&dump, &options, config).unwrap();
-    assert_eq!(
-        std::fs::read(ca_dir.join(KEY_FILE)).ok(),
-        before,
-        "planning wrote"
-    );
-    let outcome = plan.as_ref().map(SigningKeyPlan::outcome);
+    let before = contents(ca_dir);
+    let plan = plan_files(&dump, &options, config, ssh).unwrap();
+    assert_eq!(contents(ca_dir), before, "planning wrote");
+    let reports = plan.iter().map(FilePlan::report).collect();
 
     let target = aurcache_db::testing::memory_db().await;
     let writer = aurcache_activitylog::activity_utils::spawn(target.clone());
@@ -1690,15 +1710,16 @@ async fn restore_with(
     writer.task.await.unwrap();
 
     let mut restored = Restored {
-        outcome,
+        reports,
         failures: Vec::new(),
         imported: false,
         recorded: aurcache_db::prelude::Logs::find()
             .all(&target)
             .await
             .unwrap()
-            .iter()
-            .any(|row| row.kind == "restore.signing_key_replaced"),
+            .into_iter()
+            .map(|row| row.kind)
+            .collect(),
     };
     while let Ok(entry) = progress_rx.try_recv() {
         match entry.outcome {
@@ -1710,22 +1731,28 @@ async fn restore_with(
     restored
 }
 
-/// A key this server could not sign with is refused before anything is
+/// A key that this server could not use is refused before anything is
 /// written.
 #[tokio::test]
-async fn a_signing_key_this_server_cannot_use_is_refused() {
-    let dump = load_dump(&dump_with_key(Some(&new_key(Some(PASSPHRASE)))).await).unwrap();
-    let ca = tempfile::tempdir().unwrap();
-    let config = server_key(ca.path(), KeyFile::Own, b"MINE", Some("wrong horse"));
+async fn a_key_this_server_cannot_use_is_refused() {
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(source.path().join(KEY_FILE), new_key(Some(PASSPHRASE))).unwrap();
+    std::fs::write(source.path().join(SSH_KEY), "not a key").unwrap();
+    let dump = load_dump(&dump_from(source.path()).await).unwrap();
+    let refused = |passphrase, said: &str| {
+        let ca = tempfile::tempdir().unwrap();
+        let config = server_key(ca.path(), KeyFile::Own, b"MINE", Some(passphrase));
+        let before = contents(ca.path());
+        let ssh = SshFiles::own(ca.path());
+        let error = plan_files(&dump, &take_secrets(), &config, &ssh).unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains(said), "{error}");
+        assert_eq!(contents(ca.path()), before, "planning wrote");
+    };
 
-    let error = plan_signing_key(&dump, &take_secrets(), &config).unwrap_err();
-    let error = format!("{error:#}");
-    assert!(
-        error.contains("cannot sign here") && error.contains("does not sign"),
-        "{error}"
-    );
-    assert_eq!(key_files(ca.path()), [KEY_FILE]);
-    assert_eq!(std::fs::read(ca.path().join(KEY_FILE)).unwrap(), b"MINE");
+    // The signing key is checked first, and does not unlock here.
+    refused("wrong horse", "cannot sign here: the key does not sign");
+    refused(PASSPHRASE, "SSH key (ssh/id_ed25519) cannot be used");
 }
 
 /// The server's key file is written only when the dump's key is new to a
@@ -1733,14 +1760,14 @@ async fn a_signing_key_this_server_cannot_use_is_refused() {
 /// of the restore goes ahead whatever happens to the key.
 #[tokio::test]
 async fn a_restore_replaces_only_a_key_of_the_servers_own() {
-    use SigningKeyOutcome::{KeptSupplied, Replaced, Unchanged};
+    use FileOutcome::{KeptSupplied, Replaced, Unchanged};
     struct Case {
         name: &'static str,
         dump_key: Option<Vec<u8>>,
         kind: fn(PathBuf) -> KeyFile,
         mine: Vec<u8>,
         options: RestoreOptions,
-        outcome: Option<SigningKeyOutcome>,
+        outcome: Option<FileOutcome>,
     }
     let key = new_key(Some(PASSPHRASE));
     // Another of the dump's keys, over this server's own.
@@ -1788,29 +1815,35 @@ async fn a_restore_replaces_only_a_key_of_the_servers_own() {
         let config = server_key(ca.path(), case.kind, &case.mine, Some(PASSPHRASE));
         let bytes = dump_with_key(case.dump_key.as_deref()).await;
 
-        let restored = restore_with(&bytes, ca.path(), &config, case.options).await;
-        assert_eq!(restored.outcome, case.outcome, "{name}");
+        let ssh = SshFiles::own(ca.path());
+        let restored = restore_with(&bytes, ca.path(), &config, &ssh, case.options).await;
+        assert_eq!(
+            restored.outcome(SecretFile::SigningKey),
+            case.outcome,
+            "{name}"
+        );
         assert!(restored.imported, "{name}");
         assert_eq!(restored.failures, Vec::<String>::new(), "{name}");
         let replaced = case.outcome == Some(Replaced);
-        assert_eq!(restored.recorded, replaced, "{name}");
+        let recorded = restored.recorded("restore.signing_key_replaced");
+        assert_eq!(recorded, replaced, "{name}");
         let path = ca.path().join(KEY_FILE);
         if replaced {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::read(&path).unwrap(), key);
             // The server would load it at its next start.
             InstanceKey::load(&path, Some(PASSPHRASE)).unwrap();
-            let kept = ca.path().join(kept_name(&case.mine));
+            let kept = ca.path().join(kept_as(KEY_FILE, &case.mine));
             assert_eq!(std::fs::read(&kept).unwrap(), case.mine);
             let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
             assert_eq!(
-                key_files(ca.path()),
-                [KEY_FILE.to_string(), kept_name(&case.mine)]
+                files_named(ca.path(), KEY_FILE),
+                [KEY_FILE.to_string(), kept_as(KEY_FILE, &case.mine)]
             );
         } else {
             assert_eq!(std::fs::read(&path).unwrap(), case.mine, "{name}");
-            assert_eq!(key_files(ca.path()), [KEY_FILE], "{name}");
+            assert_eq!(files_named(ca.path(), KEY_FILE), [KEY_FILE], "{name}");
         }
     }
 }
@@ -1820,9 +1853,13 @@ async fn a_restore_replaces_only_a_key_of_the_servers_own() {
 #[tokio::test]
 async fn a_key_that_cannot_be_written_is_reported() {
     use std::os::unix::fs::PermissionsExt;
-    let bytes = dump_with_key(Some(&new_key(None))).await;
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(source.path().join(KEY_FILE), new_key(None)).unwrap();
+    std::fs::write(source.path().join(SSH_KEY), new_ssh_key()).unwrap();
+    let bytes = dump_from(source.path()).await;
     let ca = tempfile::tempdir().unwrap();
     let config = server_key(ca.path(), KeyFile::Own, b"MINE", None);
+    std::fs::write(ca.path().join(SSH_KEY), "MINE").unwrap();
     let permissions = |mode| std::fs::Permissions::from_mode(mode);
     std::fs::set_permissions(ca.path(), permissions(0o500)).unwrap();
     if std::fs::write(ca.path().join("probe"), "").is_ok() {
@@ -1831,18 +1868,150 @@ async fn a_key_that_cannot_be_written_is_reported() {
         return;
     }
 
-    let restored = restore_with(&bytes, ca.path(), &config, take_secrets()).await;
+    let ssh = SshFiles::own(ca.path());
+    let restored = restore_with(&bytes, ca.path(), &config, &ssh, take_secrets()).await;
     std::fs::set_permissions(ca.path(), permissions(0o700)).unwrap();
-    assert_eq!(restored.outcome, Some(SigningKeyOutcome::Replaced));
-    assert!(restored.imported);
-    assert!(
-        restored
-            .failures
-            .iter()
-            .any(|error| error.contains("writing the signing key failed")),
-        "{:?}",
-        restored.failures
+    assert_eq!(
+        restored.outcome(SecretFile::SigningKey),
+        Some(FileOutcome::Replaced)
     );
-    assert!(!restored.recorded);
+    assert!(restored.imported);
+    for file in ["Signing key", "SSH key"] {
+        let said = format!("{file}: not written, though the packages were imported");
+        assert!(
+            restored.failures.iter().any(|error| error.contains(&said)),
+            "{:?}",
+            restored.failures
+        );
+    }
+    assert!(!restored.recorded("restore.signing_key_replaced"));
+    assert!(!restored.recorded("restore.ssh_key_replaced"));
     assert_eq!(std::fs::read(ca.path().join(KEY_FILE)).unwrap(), b"MINE");
+    assert_eq!(std::fs::read(ca.path().join(SSH_KEY)).unwrap(), b"MINE");
+}
+
+// ---------------------------------------------------------------------------
+// The SSH files
+// ---------------------------------------------------------------------------
+
+const SSH_KEY: &str = "id_ed25519";
+const KNOWN_HOSTS: &str = "known_hosts";
+
+fn new_ssh_key() -> Vec<u8> {
+    let key =
+        ssh_key::PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+            .unwrap();
+    key.to_openssh(ssh_key::LineEnding::LF)
+        .unwrap()
+        .as_bytes()
+        .to_vec()
+}
+
+/// The server's own SSH files are replaced by the dump's, each old one kept
+/// beside it; a supplied file is never written, and one the dump does not
+/// carry stays as it is.
+#[tokio::test]
+async fn a_restore_replaces_only_ssh_files_of_the_servers_own() {
+    use FileOutcome::{KeptSupplied, Replaced, Unchanged};
+    struct Case {
+        name: &'static str,
+        /// The server that the dump was taken from had the files.
+        dumped: bool,
+        /// This server already holds the dump's files.
+        same: bool,
+        supplied: bool,
+        outcome: Option<FileOutcome>,
+    }
+    let case = |name| Case {
+        name,
+        dumped: true,
+        same: false,
+        supplied: false,
+        outcome: Some(Replaced),
+    };
+    let cases = [
+        case("other files"),
+        Case {
+            same: true,
+            outcome: Some(Unchanged),
+            ..case("the same files")
+        },
+        Case {
+            supplied: true,
+            outcome: Some(KeptSupplied),
+            ..case("supplied files")
+        },
+        Case {
+            dumped: false,
+            outcome: None,
+            ..case("a dump from before dumps carried them")
+        },
+    ];
+    let key = new_ssh_key();
+    let hosts = b"github.com ssh-ed25519 AAAA\n".to_vec();
+    for case in cases {
+        let name = case.name;
+        let source = tempfile::tempdir().unwrap();
+        if case.dumped {
+            std::fs::write(source.path().join(SSH_KEY), &key).unwrap();
+            std::fs::write(source.path().join(KNOWN_HOSTS), &hosts).unwrap();
+        }
+        let bytes = dump_from(source.path()).await;
+        let ca = tempfile::tempdir().unwrap();
+        let (mine_key, mine_hosts) = if case.same {
+            (key.clone(), hosts.clone())
+        } else {
+            (b"MINE".to_vec(), b"MINE HOSTS\n".to_vec())
+        };
+        std::fs::write(ca.path().join(SSH_KEY), &mine_key).unwrap();
+        std::fs::write(ca.path().join(KNOWN_HOSTS), &mine_hosts).unwrap();
+        let config = server_key(ca.path(), KeyFile::Own, b"", None);
+        let ssh = if case.supplied {
+            supplied_ssh(ca.path())
+        } else {
+            SshFiles::own(ca.path())
+        };
+
+        let restored = restore_with(&bytes, ca.path(), &config, &ssh, take_secrets()).await;
+        for file in [SecretFile::SshKey, SecretFile::KnownHosts] {
+            assert_eq!(restored.outcome(file), case.outcome, "{name}: {file:?}");
+        }
+        assert!(restored.imported, "{name}");
+        assert_eq!(restored.failures, Vec::<String>::new(), "{name}");
+        let replaced = case.outcome == Some(Replaced);
+        assert_eq!(
+            restored.recorded("restore.ssh_key_replaced"),
+            replaced,
+            "{name}"
+        );
+        for (file, theirs, mine) in [
+            (SSH_KEY, &key, &mine_key),
+            (KNOWN_HOSTS, &hosts, &mine_hosts),
+        ] {
+            let now = std::fs::read(ca.path().join(file)).unwrap();
+            if replaced {
+                assert_eq!(&now, theirs, "{name}: {file}");
+                let kept = kept_as(file, mine);
+                assert_eq!(std::fs::read(ca.path().join(&kept)).unwrap(), *mine);
+                assert_eq!(files_named(ca.path(), file), [file.to_string(), kept]);
+            } else {
+                assert_eq!(&now, mine, "{name}: {file}");
+                assert_eq!(files_named(ca.path(), file), [file], "{name}");
+            }
+        }
+        if replaced {
+            // The server loads it at its next start, and its public half
+            // follows.
+            let access = aurcache_utils::ssh::SshAccess::new(
+                ssh.key.clone(),
+                ssh.known_hosts.clone(),
+                ActivityLog::discarding(),
+            );
+            let aurcache_common::api::ssh::SshKey::Ready { public_key, .. } = access.key() else {
+                panic!("the restored key does not load");
+            };
+            let public = std::fs::read_to_string(ca.path().join("id_ed25519.pub")).unwrap();
+            assert_eq!(public.trim(), public_key);
+        }
+    }
 }

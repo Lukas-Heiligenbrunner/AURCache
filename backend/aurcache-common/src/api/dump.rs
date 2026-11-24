@@ -197,7 +197,8 @@ impl std::fmt::Debug for DumpSecrets {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SecretsPolicy {
-    /// Leave this instance's CA, tokens and signing key as they are.
+    /// Leave this instance's CA, tokens, signing key and SSH files as they
+    /// are.
     #[default]
     Ignore,
     /// Take the dump's, replacing what is here.
@@ -298,8 +299,8 @@ pub struct RestoreOptions {
     /// existing package by the time the dump is written.
     #[serde(default)]
     pub clear: bool,
-    /// What to do about the CA, worker certificates, token hashes and signing
-    /// key, when the dump carries any. Ignored when it does not.
+    /// What to do about the CA, worker certificates, token hashes, signing
+    /// key and SSH files, when the dump carries any. Ignored when it does not.
     #[serde(default)]
     pub secrets: SecretsPolicy,
 }
@@ -360,49 +361,116 @@ pub struct RestoreAccepted {
     /// Populated only for a dry run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<RestoreEntry>,
-    /// What the import does, or would do, with the dump's signing key: `None`
-    /// when it carries none or its secrets are not taken.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signing_key: Option<SigningKeyOutcome>,
+    /// What the import does, or would do, with each file it carries that the
+    /// server keeps on disk: empty when it carries none or its secrets are
+    /// not taken.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<SecretFileReport>,
 }
 
-/// What an import does with the signing key a dump carries, decided before
-/// anything is written.
+impl RestoreAccepted {
+    /// The report's line about each file, as the CLI and the web UI show it.
+    #[must_use]
+    pub fn file_lines(&self, dry_run: bool) -> Vec<String> {
+        self.files.iter().map(|f| f.line(dry_run)).collect()
+    }
+}
+
+/// A file that a dump with secrets carries and the server keeps on disk.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum SigningKeyOutcome {
-    /// Written over this server's own key file once the rows commit. The
-    /// server signs with it from its next start with signing on.
+pub enum SecretFile {
+    SigningKey,
+    SshKey,
+    KnownHosts,
+}
+
+impl SecretFile {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SigningKey => "Signing key",
+            Self::SshKey => "SSH key",
+            Self::KnownHosts => "SSH known_hosts",
+        }
+    }
+
+    /// The variable that supplies the file instead.
+    const fn variable(self) -> crate::server_env::Var {
+        use crate::server_env::{
+            AURCACHE_GIT_SSH_KEY, AURCACHE_SIGNING_KEY_FILE, AURCACHE_SSH_KNOWN_HOSTS,
+        };
+        match self {
+            Self::SigningKey => AURCACHE_SIGNING_KEY_FILE,
+            Self::SshKey => AURCACHE_GIT_SSH_KEY,
+            Self::KnownHosts => AURCACHE_SSH_KNOWN_HOSTS,
+        }
+    }
+
+    /// When a replaced file takes effect.
+    const fn effect(self) -> &'static str {
+        match self {
+            Self::SigningKey => {
+                "The server signs with it from its next start with signing on, and clients \
+                 must trust it then: see the pacman-key steps under \"Signing the \
+                 repository\" in the docs."
+            }
+            Self::SshKey => {
+                "Clones use it from then on, so every remote must accept it. The settings \
+                 page and `aurcli ssh key` show it only from the server's next start: \
+                 restart before adding it to a new remote."
+            }
+            Self::KnownHosts => {
+                "Host keys are checked against it from then on: a host that only this \
+                 server's file lists is trusted on first use again."
+            }
+        }
+    }
+}
+
+/// What an import does with one of those files, decided before anything is
+/// written.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SecretFileReport {
+    pub file: SecretFile,
+    pub outcome: FileOutcome,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum FileOutcome {
+    /// Written over this server's own file once the rows commit, the old one
+    /// kept beside it.
     Replaced,
-    /// This server's key file already holds exactly the dump's.
+    /// This server's file already holds exactly the dump's.
     Unchanged,
-    /// This server signs with a key supplied with `AURCACHE_SIGNING_KEY_FILE`,
-    /// which an import never writes.
+    /// The operator supplies this file, which an import never writes.
     KeptSupplied,
 }
 
-impl SigningKeyOutcome {
-    /// The report's line about the key, as the CLI and the web UI show it.
+impl SecretFileReport {
     #[must_use]
-    pub const fn line(self, dry_run: bool) -> &'static str {
-        match (self, dry_run) {
-            (Self::Replaced, false) => {
-                "Signing key: will be replaced once the packages are imported; a failure to \
-                 write it shows in the restore's progress. The server signs with it from \
-                 its next start with signing on, and clients must trust it then: see the \
-                 pacman-key steps under \"Signing the repository\" in the docs."
+    pub fn line(self, dry_run: bool) -> String {
+        let name = self.file.name();
+        match self.outcome {
+            FileOutcome::Replaced if dry_run => {
+                format!("{name}: would be replaced. {}", self.file.effect())
             }
-            (Self::Replaced, true) => {
-                "Signing key: would be replaced. The server would sign with it from its next \
-                 start with signing on, and clients would have to trust it then: see the \
-                 pacman-key steps under \"Signing the repository\" in the docs."
+            FileOutcome::Replaced => format!(
+                "{name}: will be replaced once the packages are imported; a failure to write \
+                 it shows in the restore's progress. {}",
+                self.file.effect()
+            ),
+            FileOutcome::Unchanged => {
+                format!("{name}: unchanged; this server's is already the dump's.")
             }
-            (Self::Unchanged, _) => "Signing key: unchanged; this server's is already the dump's.",
-            (Self::KeptSupplied, _) => {
-                "Signing key: kept (supplied). This server signs with \
-                 AURCACHE_SIGNING_KEY_FILE, which a restore never writes."
-            }
+            FileOutcome::KeptSupplied => format!(
+                "{name}: kept (supplied). This server uses {}, which a restore never writes.",
+                self.file.variable()
+            ),
         }
     }
 }
