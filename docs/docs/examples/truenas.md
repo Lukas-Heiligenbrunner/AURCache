@@ -94,7 +94,9 @@ starts:
   bundled nginx), `8083` (worker protocol). Publish all three on the LAN.
 - **`AURCACHE_PUBLIC_URL`.** Set it to how pacman clients reach this machine,
   e.g. `http://192.168.1.10:8081` — the default `http://localhost:8081` only
-  works from the host itself.
+  works from the host itself. If you publish the repository on another host
+  port, put that port here: the bundled worker reaches the repository over the
+  compose network whatever it is.
 - **The worker stays `privileged: true` with a tmpfs `/run`.** Each package is
   built in a `systemd-nspawn` chroot, which needs the mounts and namespaces a
   plain container forbids. Only the worker needs this; the server runs

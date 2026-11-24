@@ -22,7 +22,7 @@ services:
       target: hybrid
     ports:
       - "${AURCACHE_PORT:-8080}:8080"
-      - "${AURCACHE_MIRROR_PORT:-8081}:8081"
+      - "${AURCACHE_MIRROR_PORT:-30081}:8081"
     environment:
       - LOG_LEVEL=info,aurcache=debug,aurcache_api=debug
       - RUST_LOG=info,aurcache_worker_docker=debug
@@ -31,7 +31,9 @@ services:
       - BUILD_ARTIFACT_DIR=${E2E_BUILD_DIR:-/tmp/aurcache-legacy-builds}
       # Built locally by the test; the published default would be pulled.
       - BUILDER_IMAGE=aurcache-legacy-builder:test
-      - AURCACHE_PUBLIC_URL=http://localhost:8081
+      # Clients reach the repository on another port than the server's own, as
+      # on TrueNAS. The embedded worker must not take its port from here.
+      - AURCACHE_PUBLIC_URL=http://localhost:${AURCACHE_MIRROR_PORT:-30081}
     volumes:
       - db:/app/db
       - repo:/app/repo

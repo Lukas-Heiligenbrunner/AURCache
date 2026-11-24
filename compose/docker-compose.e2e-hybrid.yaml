@@ -26,13 +26,13 @@ services:
       target: hybrid
     ports:
       - "${AURCACHE_PORT:-8080}:8080"          # Web UI + API
-      - "${AURCACHE_MIRROR_PORT:-8081}:8081"   # Pacman repo
+      - "${AURCACHE_MIRROR_PORT:-30081}:8081"  # Pacman repo
     environment:
       - LOG_LEVEL=info,aurcache=debug,aurcache_api=debug,aurcache_utils=debug,aurcache_db=debug
       - RUST_LOG=info,aurcache_worker=debug
-      # The embedded worker reaches the server over loopback, so the repository
-      # URL baked into build configs is this container's own port.
-      - AURCACHE_PUBLIC_URL=http://localhost:8081
+      # Clients reach the repository on another port than the server's own, as
+      # on TrueNAS. The embedded worker must not take its port from here.
+      - AURCACHE_PUBLIC_URL=http://localhost:${AURCACHE_MIRROR_PORT:-30081}
     volumes:
       - db:/app/db
       - repo:/app/repo

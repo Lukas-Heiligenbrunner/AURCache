@@ -425,6 +425,10 @@ mod tests {
             args.contains("AURCACHE_URL=https://aurcache:8083"),
             "{args}"
         );
+        assert!(
+            args.contains("AURCACHE_REPO_URL=http://aurcache:8081"),
+            "{args}"
+        );
         assert!(!args.contains("CA_FINGERPRINT"), "{args}");
     }
 

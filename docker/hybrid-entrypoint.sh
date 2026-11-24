@@ -32,6 +32,14 @@ export AURCACHE_ENROLLMENT_TOKEN="${AURCACHE_ENROLLMENT_TOKEN:-$(head -c 32 /dev
 # The worker dials the server's own worker listener, on whichever port the
 # server was given.
 export AURCACHE_URL="${AURCACHE_URL:-https://localhost:${AURCACHE_WORKER_PORT:-8083}}"
+# Builds fetch dependencies from the server's own repository listener: the
+# public URL has the port and path pacman clients use, which need not be served
+# in here. localhost reaches it only while builds share this container's
+# network, so a network the operator names, or a repository address they set,
+# is left alone. Checked before DinD sets its own network below.
+if [ -z "${AURCACHE_REPO_URL:-}${AURCACHE_REPO_HOST:-}${AURCACHE_BUILDER_NETWORK:-}" ]; then
+    export AURCACHE_REPO_URL="http://localhost:${AURCACHE_REPO_PORT:-8081}"
+fi
 # Proves to the server that the worker presenting it is this container's own,
 # so its row is re-keyed rather than duplicated when the worker comes back under
 # a new identity -- which it does whenever the container is recreated with fresh

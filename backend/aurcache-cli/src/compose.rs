@@ -127,6 +127,9 @@ impl ComposeRole {
 #[derive(Debug, Clone, Default)]
 pub struct WorkerEnv {
     pub url: Option<String>,
+    /// The repository's base URL as this worker reaches it
+    /// (`AURCACHE_REPO_URL`), when not the server's public one.
+    pub repo_url: Option<String>,
     pub ca_fingerprint: Option<String>,
     pub enrollment_token: Option<String>,
     pub enrollment_dir: Option<String>,
@@ -230,10 +233,17 @@ impl WorkerEnv {
     /// and the shared enrollment volume is what makes approval automatic. A
     /// fingerprint pin is meaningless there: the CA is created by that very
     /// server.
+    ///
+    /// It fetches dependencies from the server's own repository listener too.
+    /// The public URL has the port and path pacman clients use, which nothing
+    /// serves inside the network once the host maps another port or a proxy
+    /// adds a path.
     #[must_use]
     pub fn beside_server(mut self) -> Self {
         self.url
             .get_or_insert_with(|| format!("https://{SERVER_SERVICE}:{AURCACHE_WORKER_PORT}"));
+        self.repo_url
+            .get_or_insert_with(|| format!("http://{SERVER_SERVICE}:{AURCACHE_REPO_PORT}"));
         self.enrollment_dir
             .get_or_insert_with(|| ENROLLMENT_DIR.to_string());
         self.ca_fingerprint = None;
@@ -255,6 +265,7 @@ impl WorkerEnv {
         };
 
         push("AURCACHE_URL", self.url.clone());
+        push("AURCACHE_REPO_URL", self.repo_url.clone());
         push(
             "AURCACHE_SERVER_CA_FINGERPRINT",
             self.ca_fingerprint.clone(),
@@ -1309,6 +1320,27 @@ mod tests {
         assert!(
             rendered.contains("AURCACHE_TLS_SANS=aurcache,localhost"),
             "{rendered}"
+        );
+    }
+
+    /// The public URL's port is the host's, which nothing listens on inside
+    /// the network. A remote worker reaches the repository the way pacman
+    /// clients do, so it is told nothing.
+    #[test]
+    fn only_the_bundle_worker_fetches_from_the_servers_own_listener() {
+        let bundle = parsed(&ComposeParams {
+            public_url: "http://nas.lan:30081".to_string(),
+            ..params(ComposeRole::Bundle)
+        });
+        assert_eq!(
+            value_of(&environment(&bundle, "builder"), "AURCACHE_REPO_URL").as_deref(),
+            Some("http://aurcache:8081")
+        );
+
+        let worker = parsed(&params(ComposeRole::Worker));
+        assert_eq!(
+            value_of(&environment(&worker, "builder"), "AURCACHE_REPO_URL"),
+            None
         );
     }
 
