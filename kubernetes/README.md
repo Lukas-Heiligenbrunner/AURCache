@@ -4,8 +4,9 @@ Plain manifests for running AURCache on Kubernetes, assembled with Kustomize
 (built into `kubectl`). From the repository root:
 
 ```bash
-kubectl apply -k kubernetes/          # the server and its workers
-kubectl apply -k kubernetes/server/   # the server alone
+kubectl apply -k kubernetes/              # the server and its workers
+kubectl apply -k kubernetes/server/       # the server alone
+kubectl apply -k kubernetes/kube-worker/  # after the server: the Kubernetes worker
 ```
 
 The [Kubernetes page](https://lukas-heiligenbrunner.github.io/AURCache/docs/setup/kubernetes)
@@ -23,3 +24,4 @@ the server, and the options below.
 | `components/pool-image` | The chroot workers' storage pools in an image file on their data volume, for a storage class without raw block volumes. |
 | `components/chroot-worker-egress` | A NetworkPolicy keeping the chroot workers' builds off private addresses. |
 | `components/postgres` | The server's database in an existing PostgreSQL instead of SQLite. |
+| `kube-worker/` | The Kubernetes worker: an unprivileged dispatcher beside the server that builds each package in a pod of its own, in the `aurcache-builds` namespace. A kustomization of its own, applied after `server/` or enabled in `kustomization.yaml`. |

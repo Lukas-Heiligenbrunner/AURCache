@@ -75,7 +75,8 @@ contain it. The package and the hybrid image install it at
 path. The worker refuses to start without it. It must be statically linked:
 it runs in the builder image, for any architecture, where the worker's own
 libraries are not, and one that is not fails every build as its container
-starts.
+starts. The [Kubernetes worker](./kubernetes.md) runs the same agent, so a
+build behaves alike on both.
 
 Inside the container the agent works in four steps:
 
@@ -145,7 +146,7 @@ that the repository address the worker uses means the same thing inside the
 build. A build can therefore reach whatever the worker can, the server's worker
 port included; that port asks for a client certificate, which a build does not
 have. `AURCACHE_BUILDER_NETWORK` puts builds on a Docker network you name
-instead. Nothing here firewalls a build.
+instead. Unlike the Kubernetes worker, nothing here firewalls a build.
 
 `/dev/shm` is as large as the memory limit, or 2 GiB when none is set.
 

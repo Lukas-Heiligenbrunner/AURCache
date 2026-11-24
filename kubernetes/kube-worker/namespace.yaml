@@ -1,0 +1,11 @@
+# Where build pods run, at `baseline`: a build container is root with seven
+# capabilities, which `restricted` forbids.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-builds
+    app.kubernetes.io/component: kube-worker
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest

@@ -123,7 +123,8 @@ _aurcache_cargo_build() {
 # Whether the cargo arguments name a package that ships the build agent.
 #
 # The Docker worker copies the agent into each build's container, so its
-# package carries one. The chroot worker runs none.
+# package carries one. The Kubernetes worker's builds take theirs from the
+# dispatcher's image, and the chroot worker runs none.
 _aurcache_ships_agent() {
     local arg previous=
     for arg in "$@"; do

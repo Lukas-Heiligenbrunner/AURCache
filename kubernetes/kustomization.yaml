@@ -41,6 +41,9 @@ labels:
 
 resources:
   - server
+  # The Kubernetes worker, unprivileged; see docs/docs/workers/kubernetes.md.
+  # Its image is set in kube-worker/kustomization.yaml, not in `images:` here.
+  # - kube-worker
 
 # The workers. Each component adds one kind, and they can be combined.
 components:

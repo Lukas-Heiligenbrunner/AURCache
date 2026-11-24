@@ -378,14 +378,15 @@ What it does not:
 - A worker that does not read the key name a job carries offers its default
   key to every build it runs, whatever the server's setting says.
 
-## On the Docker worker
+## On the Docker and Kubernetes workers
 
-The Docker worker takes `WORKER_GIT_SSH_KEY` and `WORKER_SSH_KNOWN_HOSTS`
-too, and keeps the key out of the build: it stays in an `ssh-agent` of the
-worker's own, which a build reaches over a link while makepkg runs. A build
-can have the key sign while it runs, and cannot copy it. Unlike here, nothing
-is generated, it holds no [named keys](#named-keys), and `known_hosts` is
-required. See [Docker worker](./docker.md#build-credentials).
+The Docker and Kubernetes workers take `WORKER_GIT_SSH_KEY` and
+`WORKER_SSH_KNOWN_HOSTS` too, and keep the key out of the build: it stays in
+an `ssh-agent` of the worker's own, which a build reaches over a link while
+makepkg runs. A build can have the key sign while it runs, and cannot copy it.
+Unlike here, nothing is generated, they hold no [named keys](#named-keys), and
+`known_hosts` is required. See [Docker worker](./docker.md#build-credentials)
+and [Kubernetes worker](./kubernetes.md#build-credentials).
 
 ## Other credentials
 
