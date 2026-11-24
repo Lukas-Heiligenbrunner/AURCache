@@ -539,8 +539,8 @@ fn server_service(params: &ComposeParams) -> String {
          \x20     # dials. In-compose that is the service name; keep `localhost` so the\n\
          \x20     # UI/API is reachable from the host too.\n\
          \x20     - AURCACHE_TLS_SANS={tls_sans}\n\
-         \x20     # Public base URL pacman clients (and workers) use to fetch built\n\
-         \x20     # packages. Set this to your host's address or domain for remote clients.\n\
+         \x20     # Public base URL pacman clients use to fetch built packages.\n\
+         \x20     # Set this to your host's address or domain for remote clients.\n\
          \x20     - AURCACHE_PUBLIC_URL={public_url}\n\
          \x20     # Auto-approve any worker that can write to the shared `enroll` volume,\n\
          \x20     # mounted read-only here. No secret, no approval click.\n\

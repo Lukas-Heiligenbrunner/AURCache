@@ -54,7 +54,7 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | BUILD_SSH_KEY          | String        | Name of the worker-held SSH key builds use: `default` is the worker's own key, any other a key the worker holds in `WORKER_GIT_SSH_KEYS`. Empty sets nothing: the global setting applies, or `default` when none is stored. A value that is no key name reads as `default`, with a warning in the log. Also a setting, per package or global; see [Build credentials](../workers/credentials.md) | `default` |
 | SECRET_KEY             | String        | \>32Byte Random String for singing cookies                            | Random  |
 | AURCACHE_REPO_NAME     | String        | Pacman section and database filename prefix; see [Repository name](#repository-name) | `repo` |
-| AURCACHE_PUBLIC_URL    | String        | Base URL workers use for the pacman repo, baked into build configs. Example: `http://aurcache:8081`. One that names no port means `AURCACHE_REPO_PORT` | `http://localhost:<AURCACHE_REPO_PORT>` |
+| AURCACHE_PUBLIC_URL    | String        | Base URL that pacman clients reach the repository at, and the base of the `Server =` line that `aurcli repo config` gives them. Example: `http://192.168.1.10:8081`. Workers use its scheme, port and path, with the host that they reach the server at, unless their own [`AURCACHE_REPO_URL` or `AURCACHE_REPO_HOST`](../workers/split-chroot.md#connecting-to-aurcache) says otherwise. One that names no port means `AURCACHE_REPO_PORT` | `http://localhost:<AURCACHE_REPO_PORT>` |
 | AURCACHE_PROTECTED_DIR | Paths         | Further directories a PKGBUILD parse may not read, colon-separated, added to the built-in list; see [Package parsing](./package-parsing.md) | none |
 | AURCACHE_SANDBOX       | Path          | The `aurcache-sandbox` a parse runs under, for an install outside the default place; absolute | `/usr/bin/aurcache-sandbox` |
 | AURCACHE_PKGBUILD_BRIDGE | Path        | The `alpm-pkgbuild-bridge` script a parse runs, likewise | `/usr/bin/alpm-pkgbuild-bridge` |
@@ -215,10 +215,9 @@ keep their original meanings — `BUILD_ARTIFACT_DIR` is in fact what selects
 host build mode there, as it always did.
 
 `MAX_CONCURRENT_BUILDS` is replaced by `WORKER_CONCURRENCY` on each worker (the
-hybrid image still reads it, as its embedded worker's default), and
-`AURCACHE_REPO_URL` by `AURCACHE_PUBLIC_URL`. The values an upgrade from 0.5
-finds for them on its settings page become the embedded worker's; see
-[Upgrading from 0.5](../overview/upgrading.md#settings).
+hybrid image still reads it, as its embedded worker's default). The value an
+upgrade from 0.5 finds for it on its settings page becomes the embedded
+worker's; see [Upgrading from 0.5](../overview/upgrading.md#settings).
 :::
 
 ## Build workers
