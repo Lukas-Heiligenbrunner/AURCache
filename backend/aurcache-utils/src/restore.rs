@@ -28,9 +28,10 @@ use std::io::Read;
 
 use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
-    DumpSecrets, DumpSettings, DumpToken, DumpWorker, ExistingPackagePolicy, MANIFEST_FILE,
-    PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome, SETTINGS_FILE,
-    SIGNING_KEY_FILE, SecretsPolicy, SigningKeyOutcome, TOKENS_FILE, WORKERS_FILE,
+    DumpSecrets, DumpSettings, DumpToken, DumpWorker, ExistingPackagePolicy, KNOWN_HOSTS_FILE,
+    MANIFEST_FILE, PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome,
+    SETTINGS_FILE, SIGNING_KEY_FILE, SSH_KEY_FILE, SecretsPolicy, SigningKeyOutcome, TOKENS_FILE,
+    WORKERS_FILE,
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
@@ -69,16 +70,16 @@ pub struct LoadedDump {
 /// dump describes, which is worse than either.
 pub fn load_dump(bytes: &[u8]) -> anyhow::Result<LoadedDump> {
     let mut files = BTreeMap::new();
-    let mut signing_key = None;
+    let mut stored = BTreeMap::new();
     let mut archive = tar::Archive::new(GzDecoder::new(bytes));
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_string_lossy().into_owned();
-        // The signing key is kept as stored, which may be binary.
-        if path == SIGNING_KEY_FILE {
+        // Files the server keeps are carried as stored, which may be binary.
+        if STORED_FILES.contains(&path.as_str()) {
             let mut content = Vec::new();
             entry.read_to_end(&mut content)?;
-            signing_key = Some(content);
+            stored.insert(path, content);
             continue;
         }
         let mut content = String::new();
@@ -145,7 +146,7 @@ pub fn load_dump(bytes: &[u8]) -> anyhow::Result<LoadedDump> {
             .map_err(|e| anyhow::anyhow!("'{pkgbase}': {e}"))?;
     }
 
-    let secrets = load_secrets(&files, &workers, signing_key)?;
+    let secrets = load_secrets(&files, &workers, stored)?;
     // The flag exists so a reader can tell what it is holding before unpacking
     // it. One that disagrees with the contents is a dump that has been edited,
     // and the safe reading of "the manifest says no secrets" is not one worth
@@ -180,7 +181,7 @@ pub fn load_dump(bytes: &[u8]) -> anyhow::Result<LoadedDump> {
 fn load_secrets(
     files: &BTreeMap<String, String>,
     workers: &[DumpWorker],
-    signing_key: Option<Vec<u8>>,
+    mut stored: BTreeMap<String, Vec<u8>>,
 ) -> anyhow::Result<Option<DumpSecrets>> {
     let cert = files.get(CA_CERT_FILE);
     let key = files.get(CA_KEY_FILE);
@@ -197,10 +198,8 @@ fn load_secrets(
             if files.contains_key(TOKENS_FILE) {
                 anyhow::bail!("this dump carries {TOKENS_FILE} but no CA; secrets travel together");
             }
-            if signing_key.is_some() {
-                anyhow::bail!(
-                    "this dump carries {SIGNING_KEY_FILE} but no CA; secrets travel together"
-                );
+            if let Some(name) = stored.keys().next() {
+                anyhow::bail!("this dump carries {name} but no CA; secrets travel together");
             }
             return Ok(None);
         }
@@ -218,9 +217,14 @@ fn load_secrets(
         ca_cert_pem,
         ca_key_pem,
         tokens,
-        signing_key,
+        signing_key: stored.remove(SIGNING_KEY_FILE),
+        ssh_key: stored.remove(SSH_KEY_FILE),
+        known_hosts: stored.remove(KNOWN_HOSTS_FILE),
     }))
 }
+
+/// The secrets read as bytes, as the server stores them.
+const STORED_FILES: [&str; 3] = [SIGNING_KEY_FILE, SSH_KEY_FILE, KNOWN_HOSTS_FILE];
 
 fn parse<T: serde::de::DeserializeOwned>(
     files: &BTreeMap<String, String>,

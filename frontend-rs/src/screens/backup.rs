@@ -84,7 +84,8 @@ fn DumpDialog(open: Signal<bool>) -> Element {
                         div { class: "text-sm", "Include secrets" }
                         div { class: "text-xs opacity-60",
                             "The CA private key, the certificates your workers hold, API \
-                             token hashes and the repository signing key. Restoring these \
+                             token hashes, the repository signing key and the server's SSH \
+                             key and known hosts. Restoring these \
                              makes a move invisible to your workers: they reconnect instead \
                              of re-enrolling."
                         }

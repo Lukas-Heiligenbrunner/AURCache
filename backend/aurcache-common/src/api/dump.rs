@@ -40,6 +40,12 @@ pub const TOKENS_FILE: &str = "tokens.json";
 /// The repository's signing key, as the server stores it, present only in a
 /// dump taken with secrets from a server that has one.
 pub const SIGNING_KEY_FILE: &str = "signing-key.asc";
+/// The server's SSH key, present only in a dump taken with secrets from a
+/// server that generated its own.
+pub const SSH_KEY_FILE: &str = "ssh/id_ed25519";
+/// The hosts the server trusted on first use, present only in a dump taken
+/// with secrets from a server that keeps its own `known_hosts`.
+pub const KNOWN_HOSTS_FILE: &str = "ssh/known_hosts";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -51,9 +57,10 @@ pub struct DumpManifest {
     pub aurcache_version: String,
     /// Unix seconds.
     pub created_at: i64,
-    /// Whether the archive carries the CA, worker certificates, token hashes
-    /// and the signing key. A dump with this set is dangerous to share -- the
-    /// CA private key mints worker identities the server accepts.
+    /// Whether the archive carries the CA, worker certificates, token hashes,
+    /// the signing key and the SSH files. A dump with this set is dangerous
+    /// to share -- the CA private key mints worker identities the server
+    /// accepts.
     pub includes_secrets: bool,
 }
 
@@ -161,6 +168,12 @@ pub struct DumpSecrets {
     /// that trusts it installs as root whatever it signs. `None` in a dump
     /// from a server without one, or written before dumps carried it.
     pub signing_key: Option<Vec<u8>>,
+    /// The server's SSH key file, byte for byte; `None` when the operator
+    /// supplies the key, or in a dump written before dumps carried it.
+    pub ssh_key: Option<Vec<u8>>,
+    /// The server's `known_hosts`, byte for byte; `None` when the operator
+    /// supplies it, or in a dump written before dumps carried it.
+    pub known_hosts: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for DumpSecrets {
@@ -168,6 +181,8 @@ impl std::fmt::Debug for DumpSecrets {
         f.debug_struct("DumpSecrets")
             .field("tokens", &self.tokens.len())
             .field("signing_key", &self.signing_key.is_some())
+            .field("ssh_key", &self.ssh_key.is_some())
+            .field("known_hosts", &self.known_hosts.is_some())
             .finish_non_exhaustive()
     }
 }
