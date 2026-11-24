@@ -8,9 +8,7 @@ use anyhow::{Context, Result};
 use aurcache_worker_container::ssh::CredentialFiles;
 use aurcache_worker_core::config::{CoreConfig, env_opt};
 use aurcache_worker_core::settings::{DEFAULT_KEYSERVER, WorkerSettings};
-use k8s_openapi::api::core::v1::{
-    Affinity, LocalObjectReference, Toleration, TopologySpreadConstraint,
-};
+use k8s_openapi::api::core::v1::{LocalObjectReference, Toleration};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -19,6 +17,8 @@ use std::time::Duration;
 const DEFAULT_NAMESPACE: &str = "aurcache-builds";
 /// The build container's image when nothing says otherwise.
 const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest";
+/// The images' pull policy when nothing says otherwise.
+const DEFAULT_PULL_POLICY: &str = "Always";
 
 /// What every worker reads, advertising the dispatcher's own architecture
 /// unless `WORKER_ARCHES` says otherwise.
@@ -30,28 +30,6 @@ pub fn core_from_env() -> CoreConfig {
     )
 }
 
-/// The pull policies Kubernetes knows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PullPolicy {
-    Always,
-    IfNotPresent,
-    Never,
-}
-
-impl PullPolicy {
-    const ALL: [Self; 3] = [Self::Always, Self::IfNotPresent, Self::Never];
-
-    /// The name Kubernetes knows it by.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Always => "Always",
-            Self::IfNotPresent => "IfNotPresent",
-            Self::Never => "Never",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub namespace: String,
@@ -60,8 +38,9 @@ pub struct Config {
     pub dispatcher: String,
     pub builder_image: String,
     /// The pull policy of every image a pod of this worker's runs: the
-    /// builder's, and the agent's.
-    pub pull_policy: PullPolicy,
+    /// builder's, and the agent's. Passed on as written: the startup dry run
+    /// refuses one that Kubernetes does not know.
+    pub pull_policy: String,
     /// The image of the `stage` and `hold` containers, which the build agent
     /// comes from (`WORKER_KUBE_AGENT_IMAGE`).
     pub agent_image: String,
@@ -104,22 +83,15 @@ impl Tunables {
 }
 
 /// The fields of a build pod an operator may add, from the JSON file
-/// `WORKER_KUBE_POD_TEMPLATE` names: scheduling, labels and annotations,
-/// never a volume, a container or a security context. An unknown field is an
-/// error.
+/// `WORKER_KUBE_POD_TEMPLATE` names: where it runs and how its images are
+/// pulled, never a volume, a container or a security context. An unknown
+/// field is an error.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PodExtras {
-    pub tolerations: Option<Vec<Toleration>>,
-    pub affinity: Option<Affinity>,
     pub node_selector: Option<BTreeMap<String, String>>,
-    pub priority_class_name: Option<String>,
-    pub runtime_class_name: Option<String>,
+    pub tolerations: Option<Vec<Toleration>>,
     pub image_pull_secrets: Option<Vec<LocalObjectReference>>,
-    pub scheduler_name: Option<String>,
-    pub topology_spread_constraints: Option<Vec<TopologySpreadConstraint>>,
-    pub labels: Option<BTreeMap<String, String>>,
-    pub annotations: Option<BTreeMap<String, String>>,
 }
 
 impl PodExtras {
@@ -153,16 +125,6 @@ impl Config {
         dispatcher: &str,
         var: impl Fn(&str) -> Option<String>,
     ) -> Result<Self> {
-        let pull_policy = match var("WORKER_KUBE_IMAGE_PULL_POLICY") {
-            None => PullPolicy::Always,
-            Some(named) => PullPolicy::ALL
-                .into_iter()
-                .find(|policy| policy.as_str() == named)
-                .with_context(|| {
-                    let all = PullPolicy::ALL.map(PullPolicy::as_str).join(", ");
-                    format!("WORKER_KUBE_IMAGE_PULL_POLICY is {named:?}; expected one of {all}")
-                })?,
-        };
         let agent_image = var("WORKER_KUBE_AGENT_IMAGE").context(
             "WORKER_KUBE_AGENT_IMAGE is not set: name the image build pods take the build agent \
              from, this worker's own",
@@ -172,7 +134,8 @@ impl Config {
             dispatcher: dispatcher.to_string(),
             builder_image: var("WORKER_KUBE_BUILDER_IMAGE")
                 .unwrap_or_else(|| DEFAULT_BUILDER_IMAGE.into()),
-            pull_policy,
+            pull_policy: var("WORKER_KUBE_IMAGE_PULL_POLICY")
+                .unwrap_or_else(|| DEFAULT_PULL_POLICY.into()),
             agent_image,
             credential: CredentialFiles::from_vars(&var)?,
             extras: PodExtras::load(var("WORKER_KUBE_POD_TEMPLATE").as_deref())?,
@@ -230,7 +193,7 @@ mod tests {
         assert_eq!(cfg.namespace, "aurcache-builds");
         assert_eq!(cfg.dispatcher, "abcdef0123456789");
         assert_eq!(cfg.builder_image, DEFAULT_BUILDER_IMAGE);
-        assert_eq!(cfg.pull_policy, PullPolicy::Always);
+        assert_eq!(cfg.pull_policy, "Always");
         assert_eq!(cfg.agent_image, "reg/agent:1");
         assert_eq!(cfg.credential, None);
         assert_eq!(cfg.extras, PodExtras::default());
@@ -240,7 +203,7 @@ mod tests {
                 memory: None,
                 cpus: None,
                 disk: None,
-                schedule_timeout: Duration::from_secs(600),
+                schedule_timeout: DEFAULT_SCHEDULE_TIMEOUT,
                 keyserver: DEFAULT_KEYSERVER.into(),
             }
         );
@@ -263,7 +226,7 @@ mod tests {
         ]);
         let cfg = read(&vars).unwrap();
         assert_eq!(cfg.namespace, "b");
-        assert_eq!(cfg.pull_policy, PullPolicy::IfNotPresent);
+        assert_eq!(cfg.pull_policy, "IfNotPresent");
         assert_eq!(
             cfg.credential,
             Some(CredentialFiles {
@@ -273,17 +236,12 @@ mod tests {
         );
     }
 
+    /// A key without the hosts it may be used with.
     #[test]
-    fn bad_values_are_errors() {
-        for bad in [
-            ("WORKER_KUBE_IMAGE_PULL_POLICY", "Sometimes"),
-            // A key without the hosts it may be used with.
-            ("WORKER_GIT_SSH_KEY", "/etc/aurcache/ssh/ssh-privatekey"),
-        ] {
-            let mut vars = AGENT.to_vec();
-            vars.push(bad);
-            assert!(read(&vars).is_err(), "{bad:?}");
-        }
+    fn a_key_without_host_keys_is_an_error() {
+        let mut vars = AGENT.to_vec();
+        vars.push(("WORKER_GIT_SSH_KEY", "/etc/aurcache/ssh/ssh-privatekey"));
+        assert!(read(&vars).is_err());
     }
 
     #[test]
@@ -298,21 +256,14 @@ mod tests {
         };
 
         write(
-            r#"{"nodeSelector": {"pool": "builds"}, "priorityClassName": "low",
-                "tolerations": [{"key": "builds", "operator": "Exists"}],
-                "labels": {"team": "a"}, "annotations": {"x": "y"}}"#,
+            r#"{"nodeSelector": {"pool": "builds"},
+                "tolerations": [{"key": "builds", "operator": "Exists"}]}"#,
         );
         let extras = with_template(&path).unwrap().extras;
-        assert_eq!(extras.priority_class_name.as_deref(), Some("low"));
         assert_eq!(extras.node_selector.unwrap()["pool"], "builds");
         assert_eq!(extras.tolerations.unwrap().len(), 1);
 
-        for refused in [
-            r#"{"volumes": []}"#,
-            r#"{"containers": []}"#,
-            r#"{"securityContext": {}}"#,
-            r#"{"hostNetwork": true}"#,
-        ] {
+        for refused in [r#"{"volumes": []}"#, r#"{"affinity": {}}"#] {
             write(refused);
             assert!(with_template(&path).is_err(), "{refused}");
         }

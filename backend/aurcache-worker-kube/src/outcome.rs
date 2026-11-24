@@ -5,8 +5,7 @@
 //! container ended is judged by [`ending`], from what the container's status
 //! and the agent's report say; a pod that can no longer hand anything back is
 //! reported by [`lost`]. The other ways a build ends without a pod to read
-//! have a report each: [`refused`], [`unscheduled_past`], [`unstarted_past`],
-//! [`gone`].
+//! have a report each: [`refused`], [`unstarted`], [`gone`].
 
 use crate::pod::{BUILD, HOLD, STAGE};
 use aurcache_build_agent::report::BuildReport;
@@ -19,23 +18,8 @@ use std::time::Duration;
 
 /// The variable an operator raises the per-build disk limit with.
 const DISK_VARIABLE: &str = "WORKER_BUILD_DISK_MAX";
-/// The variable that says how long a pod may wait for a node, and then to
-/// start on it.
+/// The variable that says how long a pod may take to start its build.
 const SCHEDULE_VARIABLE: &str = "WORKER_KUBE_SCHEDULE_TIMEOUT";
-
-/// Reasons a container waits that waiting does not cure: the image has a
-/// name nothing can pull, or the container cannot be made from the pod's own
-/// description.
-const STUCK: [&str; 4] = [
-    "InvalidImageName",
-    "ErrImageNeverPull",
-    "CreateContainerConfigError",
-    "CreateContainerError",
-];
-
-/// Reasons a container waits that may pass: a pull failed, and the kubelet
-/// tries again.
-const UNPULLED: [&str; 2] = ["ErrImagePull", "ImagePullBackOff"];
 
 /// Where a build pod is, as far as its status says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,22 +27,16 @@ pub enum Observed {
     /// No node has taken it. `unschedulable` is the scheduler's message once
     /// it has looked and found none.
     Unscheduled { unschedulable: Option<String> },
-    /// On a node, with `stage` not running yet.
+    /// On a node, with `stage` not running yet. `waiting` is the kubelet's
+    /// reason and message, such as an image it cannot pull.
     Starting {
         node: Option<String>,
         waiting: Option<String>,
     },
-    /// A container's image could not be pulled, and the node tries again.
-    /// Whoever reads this decides how long that is worth waiting for.
-    Unpulled { message: String },
     /// `stage` runs: the pod is waiting for the job.
     Staged,
     /// The job is in, and the build container has not ended.
-    Building {
-        /// Whether `hold` runs, which is what the log is followed through.
-        hold_runs: bool,
-        waiting: Option<String>,
-    },
+    Building { waiting: Option<String> },
     /// The build container ended, and `hold` keeps the pod up for the
     /// hand-back.
     Built(BuildEnd),
@@ -84,8 +62,6 @@ pub enum Loss {
     Evicted { message: String },
     /// It ran past `activeDeadlineSeconds`.
     DeadlineExceeded,
-    /// A container cannot start, and waiting does not cure it.
-    Stuck { message: String },
     /// It ended some other way that leaves nothing to hand back.
     Failed { message: String },
 }
@@ -114,22 +90,7 @@ pub fn observe(pod: &Pod) -> Observed {
                 message: format!("the stage container failed: {detail}"),
             });
         }
-        Some(State::Waiting { reason, message }) if is_stuck(reason.as_deref()) => {
-            return Observed::Lost(Loss::Stuck {
-                message: stuck_message(STAGE, reason.as_deref(), message.as_deref()),
-            });
-        }
-        Some(State::Waiting { reason, message }) if is_unpulled(reason.as_deref()) => {
-            return Observed::Unpulled {
-                message: stuck_message(STAGE, reason.as_deref(), message.as_deref()),
-            };
-        }
-        Some(State::Waiting { reason, .. }) => {
-            return Observed::Starting {
-                node,
-                waiting: reason,
-            };
-        }
+        Some(State::Waiting { waiting }) => return Observed::Starting { node, waiting },
         None | Some(State::Unknown) => {
             return Observed::Starting {
                 node,
@@ -153,37 +114,16 @@ fn building(status: &PodStatus) -> Observed {
             detail: detail.clone(),
         });
     }
-    for (name, found) in [(BUILD, &build), (HOLD, &hold)] {
-        if let Some(State::Waiting { reason, message }) = found
-            && is_stuck(reason.as_deref())
-        {
-            return Observed::Lost(Loss::Stuck {
-                message: stuck_message(name, reason.as_deref(), message.as_deref()),
-            });
-        }
-    }
     if let Some(State::Ended { detail, .. }) = &hold {
         return Observed::Lost(Loss::Failed {
             message: format!("the hold container ended while the build ran: {detail}"),
         });
     }
-    for (name, found) in [(BUILD, &build), (HOLD, &hold)] {
-        if let Some(State::Waiting { reason, message }) = found
-            && is_unpulled(reason.as_deref())
-        {
-            return Observed::Unpulled {
-                message: stuck_message(name, reason.as_deref(), message.as_deref()),
-            };
-        }
-    }
     let waiting = match build {
-        Some(State::Waiting { reason, .. }) => reason,
+        Some(State::Waiting { waiting }) => waiting,
         _ => None,
     };
-    Observed::Building {
-        hold_runs: matches!(hold, Some(State::Running)),
-        waiting,
-    }
+    Observed::Building { waiting }
 }
 
 /// What the pod's own phase and reason say is beyond recovery, before any
@@ -214,11 +154,9 @@ fn pod_loss(status: &PodStatus) -> Option<Loss> {
 }
 
 /// Whether an eviction message says the pod passed a limit of its own. The
-/// kubelet words those as a limit that was exceeded ("Usage of EmptyDir
-/// volume "work" exceeds the limit", "Container build exceeded its local
-/// ephemeral storage limit", "Pod ephemeral local storage usage exceeds the
-/// total limit of containers"), and an eviction for the node's sake as "The
-/// node was low on resource".
+/// kubelet words those as a limit that was exceeded, and an eviction for the
+/// node's sake as "The node was low on resource"; checked against kubelet
+/// v1.37.0, `pkg/kubelet/eviction/helpers.go`.
 fn over_own_limit(message: &str) -> bool {
     message.contains("exceed") && message.contains("limit")
 }
@@ -257,9 +195,9 @@ pub fn unschedulable(pod: &Pod) -> Option<String> {
 
 /// One container's state, reduced to what the lifecycle reads.
 enum State {
+    /// The kubelet's reason, with its message when it has one.
     Waiting {
-        reason: Option<String>,
-        message: Option<String>,
+        waiting: Option<String>,
     },
     Running,
     Ended {
@@ -297,28 +235,18 @@ fn state(status: &ContainerStatus) -> State {
     } else if running.is_some() {
         State::Running
     } else if let Some(waiting) = waiting {
+        let message = waiting
+            .message
+            .as_deref()
+            .filter(|message| !message.is_empty());
         State::Waiting {
-            reason: waiting.reason.clone(),
-            message: waiting.message.clone(),
+            waiting: match (&waiting.reason, message) {
+                (Some(reason), Some(message)) => Some(format!("{reason}: {message}")),
+                (reason, _) => reason.clone(),
+            },
         }
     } else {
         State::Unknown
-    }
-}
-
-fn is_stuck(reason: Option<&str>) -> bool {
-    reason.is_some_and(|reason| STUCK.contains(&reason))
-}
-
-fn is_unpulled(reason: Option<&str>) -> bool {
-    reason.is_some_and(|reason| UNPULLED.contains(&reason))
-}
-
-fn stuck_message(container: &str, reason: Option<&str>, message: Option<&str>) -> String {
-    let reason = reason.unwrap_or("it cannot start");
-    match message.filter(|message| !message.is_empty()) {
-        Some(message) => format!("the {container} container cannot start: {reason}: {message}"),
-        None => format!("the {container} container cannot start: {reason}"),
     }
 }
 
@@ -350,10 +278,8 @@ impl Observed {
             )),
             Self::Building {
                 waiting: Some(reason),
-                ..
             } => Some(format!("the build container is starting ({reason})")),
-            Self::Building { waiting: None, .. } => Some("the build is running".to_string()),
-            Self::Unpulled { message } => Some(format!("{message}; the node tries again")),
+            Self::Building { waiting: None } => Some("the build is running".to_string()),
             Self::Staged | Self::Built(_) | Self::Lost(_) => None,
         }
     }
@@ -399,7 +325,7 @@ pub fn lost(
             Some(timeout) => ended(Some(Stop::TimedOut(timeout)), elapsed, Exit::Unknown),
             None => interrupted("the build pod ran past its deadline"),
         },
-        Loss::Stuck { message } | Loss::Failed { message } => interrupted(message),
+        Loss::Failed { message } => interrupted(message),
     }
 }
 
@@ -431,36 +357,15 @@ pub fn refused(message: &str) -> CompleteReport {
     interrupted(format!("the cluster refused the build pod: {message}"))
 }
 
-/// The report for a pod no node took within `waited`, with the scheduler's
-/// message when it gave one.
+/// The report for a pod whose build did not run within `waited` of its
+/// creation. `last` is the last its status said of it; what holds it is
+/// often only in the namespace's events.
 #[must_use]
-pub fn unscheduled_past(waited: Duration, message: Option<&str>) -> CompleteReport {
-    let waited = with_unit(waited);
-    let why = message.map_or_else(String::new, |message| format!(": {message}"));
-    interrupted(format!(
-        "no node could take the build within {waited} ({SCHEDULE_VARIABLE}){why}"
-    ))
-}
-
-/// The report for a pod that a node took, and that did not start one of
-/// its containers within `waited`. `last` is the last its status said of
-/// it, which seldom says why: that is in the namespace's events.
-#[must_use]
-pub fn unstarted_past(waited: Duration, last: &str, namespace: &str) -> CompleteReport {
+pub fn unstarted(waited: Duration, last: &str, namespace: &str) -> CompleteReport {
+    let last = last.trim_end_matches('.');
     interrupted(format!(
         "the build pod did not start within {} ({SCHEDULE_VARIABLE}); when last seen, \
-         {last}. `kubectl -n {namespace} get events` says what holds it: an image that \
-         cannot be pulled, a volume that cannot be mounted, or a network the node cannot \
-         give the pod",
-        with_unit(waited)
-    ))
-}
-
-/// The report for a hand-in that did not end within `waited`.
-#[must_use]
-pub fn unreceived_past(waited: Duration) -> CompleteReport {
-    interrupted(format!(
-        "the build pod did not take the job within {} ({SCHEDULE_VARIABLE})",
+         {last}. `kubectl -n {namespace} get events` says what holds it",
         with_unit(waited)
     ))
 }
@@ -583,31 +488,13 @@ mod tests {
     }
 
     #[test]
-    fn a_pod_with_no_status_or_no_node_is_unscheduled() {
+    fn a_pod_without_a_node_is_unscheduled_with_the_schedulers_message() {
         assert_eq!(
             observe(&Pod::default()),
             Observed::Unscheduled {
                 unschedulable: None
             }
         );
-        let pending = Pod {
-            status: Some(PodStatus {
-                phase: Some("Pending".to_string()),
-                ..PodStatus::default()
-            }),
-            ..Pod::default()
-        };
-        assert_eq!(
-            observe(&pending),
-            Observed::Unscheduled {
-                unschedulable: None
-            }
-        );
-        assert_eq!(unschedulable(&pending), None);
-    }
-
-    #[test]
-    fn the_schedulers_refusal_is_read_with_its_message() {
         let pod = Pod {
             status: Some(PodStatus {
                 phase: Some("Pending".to_string()),
@@ -656,7 +543,6 @@ mod tests {
         assert_eq!(
             observe(&pulling),
             Observed::Building {
-                hold_runs: false,
                 waiting: Some("ContainerCreating".to_string())
             }
         );
@@ -664,13 +550,7 @@ mod tests {
             terminated(0, "Completed"),
             &[(BUILD, running()), (HOLD, running())],
         );
-        assert_eq!(
-            observe(&building),
-            Observed::Building {
-                hold_runs: true,
-                waiting: None
-            }
-        );
+        assert_eq!(observe(&building), Observed::Building { waiting: None });
         let built = pod(
             terminated(0, "Completed"),
             &[(BUILD, terminated(0, "Completed")), (HOLD, running())],
@@ -768,88 +648,37 @@ mod tests {
         assert_eq!(unlimited.outcome, BuildOutcome::Interrupted);
     }
 
-    /// The row "`CreateContainerConfigError`", wherever in the pod it shows:
-    /// a container that cannot be made from the pod's own description.
+    /// A container that cannot start is waited for: what the kubelet says of
+    /// it is in the build log, and in the report once the start deadline
+    /// passes.
     #[test]
-    fn a_container_that_cannot_start_is_an_interruption_with_the_status_message() {
-        let cases = [
-            pod(
-                waiting("InvalidImageName", "couldn't parse image name"),
-                &[],
-            ),
-            pod(
-                terminated(0, "Completed"),
-                &[
-                    (BUILD, waiting("ErrImageNeverPull", "image is not present")),
-                    (HOLD, running()),
-                ],
-            ),
-            pod(
-                terminated(0, "Completed"),
-                &[
-                    (BUILD, running()),
-                    (
-                        HOLD,
-                        waiting("CreateContainerConfigError", "secret not found"),
-                    ),
-                ],
-            ),
-        ];
-        for case in &cases {
-            let Observed::Lost(loss) = observe(case) else {
-                panic!("{case:?}");
-            };
-            assert!(matches!(loss, Loss::Stuck { .. }));
-            let done = lost(&loss, secs(1), None, None);
-            assert_eq!(done.outcome, BuildOutcome::Interrupted);
-            assert!(done.reason.unwrap().contains("cannot start"));
-        }
-    }
-
-    /// The row "`ErrImagePull`/`ImagePullBackOff`": the node tries again, so
-    /// it is not a loss by itself, in whichever container it shows.
-    #[test]
-    fn an_image_that_could_not_be_pulled_is_not_yet_a_loss() {
-        let cases = [
-            pod(waiting("ErrImagePull", "manifest unknown"), &[]),
-            pod(
-                terminated(0, "Completed"),
-                &[
-                    (BUILD, waiting("ImagePullBackOff", "Back-off pulling image")),
-                    (HOLD, running()),
-                ],
-            ),
-        ];
-        for case in &cases {
-            assert!(
-                matches!(observe(case), Observed::Unpulled { .. }),
-                "{case:?}"
-            );
-        }
-        let observed = observe(&cases[0]);
+    fn a_container_that_cannot_start_says_why_and_points_at_the_events() {
+        let unpulled = pod(waiting("ErrImagePull", "manifest unknown"), &[]);
+        let line = observe(&unpulled).line().unwrap();
         assert_eq!(
-            observed.line().unwrap(),
-            "the stage container cannot start: ErrImagePull: manifest unknown; the node tries \
-             again"
+            line,
+            "the build pod is starting on node n1 (ErrImagePull: manifest unknown)"
         );
-    }
-
-    /// The row "a pod that does not start": the worker's, with where to look.
-    #[test]
-    fn a_pod_that_does_not_start_is_an_interruption_that_points_at_the_events() {
-        let done = unstarted_past(
-            secs(600),
-            "the build pod is starting on node n1 (PodInitializing)",
-            "aurcache-builds",
-        );
+        let done = unstarted(secs(600), &line, "aurcache-builds");
         assert_eq!(done.outcome, BuildOutcome::Interrupted);
-        let reason = done.reason.unwrap();
-        assert!(reason.contains("did not start within 10m"), "{reason}");
-        assert!(reason.contains("WORKER_KUBE_SCHEDULE_TIMEOUT"), "{reason}");
-        assert!(reason.contains("(PodInitializing)"), "{reason}");
-        assert!(
-            reason.contains("kubectl -n aurcache-builds get events"),
-            "{reason}"
+        assert_eq!(
+            done.reason.as_deref(),
+            Some(
+                "the build pod did not start within 10m (WORKER_KUBE_SCHEDULE_TIMEOUT); when \
+                 last seen, the build pod is starting on node n1 (ErrImagePull: manifest \
+                 unknown). `kubectl -n aurcache-builds get events` says what holds it"
+            )
+        );
+        let backing_off = pod(
+            terminated(0, "Completed"),
+            &[
+                (BUILD, waiting("ImagePullBackOff", "Back-off pulling image")),
+                (HOLD, running()),
+            ],
+        );
+        assert_eq!(
+            observe(&backing_off).line().unwrap(),
+            "the build container is starting (ImagePullBackOff: Back-off pulling image)"
         );
     }
 
@@ -880,24 +709,8 @@ mod tests {
         );
     }
 
-    /// The rows "unschedulable past the timeout", "creation refused" and "the
-    /// pod disappears".
     #[test]
-    fn the_endings_with_no_pod_to_read_are_interruptions() {
-        let late = unscheduled_past(secs(600), Some("0/3 nodes are available"));
-        assert_eq!(late.outcome, BuildOutcome::Interrupted);
-        assert_eq!(
-            late.reason.as_deref(),
-            Some(
-                "no node could take the build within 10m (WORKER_KUBE_SCHEDULE_TIMEOUT): \
-                 0/3 nodes are available"
-            )
-        );
-        let soon = unscheduled_past(secs(90), None);
-        assert_eq!(
-            soon.reason.as_deref(),
-            Some("no node could take the build within 90s (WORKER_KUBE_SCHEDULE_TIMEOUT)")
-        );
+    fn a_refused_or_vanished_pod_is_an_interruption() {
         let no = refused("exceeded quota: builds");
         assert_eq!(no.outcome, BuildOutcome::Interrupted);
         assert_eq!(
@@ -905,6 +718,8 @@ mod tests {
             Some("the cluster refused the build pod: exceeded quota: builds")
         );
         assert_eq!(gone().outcome, BuildOutcome::Interrupted);
+        let soon = unstarted(secs(90), "the build pod is waiting for a node", "b");
+        assert!(soon.reason.unwrap().contains("within 90s"));
     }
 
     /// A stop is the worker's own and wins over anything the pod says.

@@ -21,7 +21,8 @@ pub const MANAGED_BY: &str = "aurcache-worker-kube";
 pub const BUILD: &str = "build";
 /// The init container that installs the agent and receives the job.
 pub const STAGE: &str = "stage";
-/// The container that keeps the pod up for the hand-back.
+/// The container that keeps the pod up for the hand-back, and that the log
+/// and the packages are read through.
 pub const HOLD: &str = "hold";
 /// Where the work volume is mounted, in every container.
 pub const WORK: &str = "/work";
@@ -37,6 +38,9 @@ const NOBODY: i64 = 65534;
 /// it: the server's `REAP_BACKSTOP_GRACE`, after which it takes nothing more
 /// of the build.
 const DEADLINE_GRACE: Duration = Duration::from_secs(5 * 60);
+/// The deadline of a pod whose build has no timeout, so that a pod the
+/// dispatcher never deleted does not hold its place in a quota for ever.
+const UNTIMED_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 
 const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 const LABEL_DISPATCHER: &str = "aurcache.io/dispatcher";
@@ -161,7 +165,7 @@ fn mount(name: &str, path: &str, read_only: bool) -> VolumeMount {
 }
 
 /// The agent, where a container of the dispatcher's image has it: what
-/// `stage` and `hold` run, and what an exec into either names.
+/// `stage` runs, and what an exec into `stage` or `hold` names.
 #[must_use]
 pub fn agent_path() -> String {
     format!("{AGENT_IN_IMAGE}/{}", layout::BIN_NAME)
@@ -198,7 +202,7 @@ fn stage(inputs: &PodInputs<'_>) -> Container {
     Container {
         name: STAGE.to_string(),
         image: Some(inputs.cfg.agent_image.clone()),
-        image_pull_policy: Some(inputs.cfg.pull_policy.as_str().to_string()),
+        image_pull_policy: Some(inputs.cfg.pull_policy.clone()),
         command: Some(
             [&agent_path(), "stage", "--work", WORK, "--tools", TOOLS]
                 .map(String::from)
@@ -220,7 +224,7 @@ fn build(inputs: &PodInputs<'_>) -> Container {
     Container {
         name: BUILD.to_string(),
         image: Some(inputs.cfg.builder_image.clone()),
-        image_pull_policy: Some(inputs.cfg.pull_policy.as_str().to_string()),
+        image_pull_policy: Some(inputs.cfg.pull_policy.clone()),
         command: Some(vec![
             build_agent_path(),
             "build".to_string(),
@@ -240,8 +244,9 @@ fn hold(inputs: &PodInputs<'_>) -> Container {
     Container {
         name: HOLD.to_string(),
         image: Some(inputs.cfg.agent_image.clone()),
-        image_pull_policy: Some(inputs.cfg.pull_policy.as_str().to_string()),
-        command: Some(vec![agent_path(), "hold".to_string()]),
+        image_pull_policy: Some(inputs.cfg.pull_policy.clone()),
+        // As PID 1 it ignores SIGTERM, so a deleted pod waits out its grace.
+        command: Some(["sleep", "infinity"].map(String::from).to_vec()),
         security_context: Some(unprivileged()),
         resources: Some(helper_resources()),
         volume_mounts: Some(vec![mount("work", WORK, true)]),
@@ -270,10 +275,8 @@ fn volumes(cfg: &Config) -> Vec<Volume> {
     ]
 }
 
-/// The pod's labels: the operator's under this worker's.
 fn pod_labels(inputs: &PodInputs<'_>, arch: &str) -> BTreeMap<String, String> {
-    let mut all = inputs.cfg.extras.labels.clone().unwrap_or_default();
-    all.extend(labels(&inputs.cfg.dispatcher));
+    let mut all = labels(&inputs.cfg.dispatcher);
     all.insert(LABEL_BUILD.to_string(), inputs.job.build_id.to_string());
     all.insert(LABEL_ARCH.to_string(), arch.to_string());
     all
@@ -287,9 +290,11 @@ fn node_selector(extras: &PodExtras, oci_arch: &str) -> BTreeMap<String, String>
     all
 }
 
-fn deadline(timeout: Option<Duration>) -> Option<i64> {
-    let total = timeout?.saturating_add(DEADLINE_GRACE);
-    Some(i64::try_from(total.as_secs()).unwrap_or(i64::MAX))
+fn deadline(timeout: Option<Duration>) -> i64 {
+    let total = timeout
+        .unwrap_or(UNTIMED_DEADLINE)
+        .saturating_add(DEADLINE_GRACE);
+    i64::try_from(total.as_secs()).unwrap_or(i64::MAX)
 }
 
 /// The pod for one build. An error for an architecture with no OCI name.
@@ -304,12 +309,11 @@ pub fn render(inputs: &PodInputs<'_>) -> Result<Pod> {
             name: Some(name(&cfg.dispatcher, inputs.job.build_id)),
             namespace: Some(cfg.namespace.clone()),
             labels: Some(pod_labels(inputs, job_arch)),
-            annotations: extras.annotations.clone(),
             ..ObjectMeta::default()
         },
         spec: Some(PodSpec {
             restart_policy: Some("Never".to_string()),
-            active_deadline_seconds: deadline(inputs.timeout),
+            active_deadline_seconds: Some(deadline(inputs.timeout)),
             service_account_name: Some(SERVICE_ACCOUNT.to_string()),
             automount_service_account_token: Some(false),
             enable_service_links: Some(false),
@@ -325,12 +329,7 @@ pub fn render(inputs: &PodInputs<'_>) -> Result<Pod> {
             containers: vec![build(inputs), hold(inputs)],
             volumes: Some(volumes(cfg)),
             tolerations: extras.tolerations.clone(),
-            affinity: extras.affinity.clone(),
-            priority_class_name: extras.priority_class_name.clone(),
-            runtime_class_name: extras.runtime_class_name.clone(),
             image_pull_secrets: extras.image_pull_secrets.clone(),
-            scheduler_name: extras.scheduler_name.clone(),
-            topology_spread_constraints: extras.topology_spread_constraints.clone(),
             ..PodSpec::default()
         }),
         ..Pod::default()
@@ -340,7 +339,7 @@ pub fn render(inputs: &PodInputs<'_>) -> Result<Pod> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PullPolicy, Tunables};
+    use crate::config::Tunables;
     use aurcache_common::worker::MirrorlistOffer;
     use serde_json::{Value, json};
 
@@ -349,7 +348,7 @@ mod tests {
             namespace: "aurcache-builds".into(),
             dispatcher: "abcdef0123456789".into(),
             builder_image: "reg/builder:1".into(),
-            pull_policy: PullPolicy::Always,
+            pull_policy: "Always".into(),
             agent_image: "reg/agent@sha256:1".into(),
             credential: None,
             extras: PodExtras::default(),
@@ -398,41 +397,29 @@ mod tests {
         pod.spec.as_ref().unwrap()
     }
 
-    fn container<'a>(pod: &'a Pod, which: &str) -> &'a Container {
-        let spec = spec(pod);
-        spec.containers
+    fn build_container(pod: &Pod) -> &Container {
+        spec(pod)
+            .containers
             .iter()
-            .chain(spec.init_containers.iter().flatten())
-            .find(|c| c.name == which)
+            .find(|c| c.name == BUILD)
             .unwrap()
     }
 
-    fn limited() -> Config {
+    fn credential() -> aurcache_worker_container::ssh::CredentialFiles {
+        aurcache_worker_container::ssh::CredentialFiles {
+            key: "/etc/aurcache/ssh/ssh-privatekey".into(),
+            known_hosts: "/etc/aurcache/ssh/known_hosts".into(),
+        }
+    }
+
+    /// The whole pod, as the API server receives it. The dispatcher holds an
+    /// SSH key here, and none of it reaches the pod.
+    #[test]
+    fn the_whole_pod() {
         let mut cfg = config();
         cfg.tunables.memory = Some(8 << 30);
         cfg.tunables.cpus = Some(1.5);
         cfg.tunables.disk = Some(30 << 30);
-        cfg
-    }
-
-    #[test]
-    fn names_and_selector() {
-        assert_eq!(
-            name("abcdef0123456789", 7),
-            "aurcache-build-abcdef0123456789-7"
-        );
-        assert_eq!(
-            selector("abcdef0123456789"),
-            "aurcache.io/dispatcher=abcdef0123456789"
-        );
-        assert_eq!(labels("d")["app.kubernetes.io/managed-by"], MANAGED_BY);
-        assert_eq!(labels("d")["aurcache.io/dispatcher"], "d");
-    }
-
-    /// The whole pod, as the API server receives it.
-    #[test]
-    fn the_whole_pod() {
-        let mut cfg = limited();
         cfg.credential = Some(credential());
         let value =
             serde_json::to_value(render_with(&cfg, 7, "aarch64", Some(3600)).unwrap()).unwrap();
@@ -509,7 +496,7 @@ mod tests {
                             "name": "hold",
                             "image": "reg/agent@sha256:1",
                             "imagePullPolicy": "Always",
-                            "command": ["/usr/local/bin/aurcache-build-agent", "hold"],
+                            "command": ["sleep", "infinity"],
                             "securityContext": unprivileged,
                             "resources": helper,
                             "volumeMounts": [{"name": "work", "mountPath": "/work",
@@ -526,77 +513,18 @@ mod tests {
     }
 
     #[test]
-    fn the_build_container_has_exactly_the_agents_capabilities() {
-        let pod = pod(&config());
-        let build = container(&pod, BUILD);
-        let security = build.security_context.as_ref().unwrap();
-        assert_eq!(security.allow_privilege_escalation, Some(false));
-        let caps = security.capabilities.as_ref().unwrap();
-        assert_eq!(caps.drop.as_deref(), Some(&["ALL".to_string()][..]));
-        let added: Vec<&str> = caps.add.iter().flatten().map(String::as_str).collect();
-        assert_eq!(added, layout::CAPABILITIES);
-    }
-
-    #[test]
-    fn stage_and_hold_are_unprivileged() {
-        let pod = pod(&config());
-        for which in [STAGE, HOLD] {
-            let security = container(&pod, which).security_context.as_ref().unwrap();
-            assert_eq!(security.run_as_non_root, Some(true), "{which}");
-            assert_eq!(security.allow_privilege_escalation, Some(false), "{which}");
-            assert_eq!(security.read_only_root_filesystem, Some(true), "{which}");
-            let caps = security.capabilities.as_ref().unwrap();
-            assert_eq!(
-                caps.drop.as_deref(),
-                Some(&["ALL".to_string()][..]),
-                "{which}"
-            );
-            assert_eq!(caps.add, None, "{which}");
-        }
-    }
-
-    #[test]
-    fn the_pod_has_no_identity_and_the_default_seccomp_profile() {
-        let pod = pod(&config());
-        let spec = spec(&pod);
-        assert_eq!(spec.service_account_name.as_deref(), Some("aurcache-build"));
-        assert_eq!(spec.automount_service_account_token, Some(false));
-        assert_eq!(spec.restart_policy.as_deref(), Some("Never"));
-        let seccomp = spec
-            .security_context
-            .as_ref()
-            .unwrap()
-            .seccomp_profile
-            .as_ref();
-        assert_eq!(seccomp.unwrap().type_, "RuntimeDefault");
-    }
-
-    #[test]
-    fn the_node_is_chosen_by_architecture() {
-        for (arch, oci) in [("x86_64", "amd64"), ("aarch64", "arm64"), ("armv7h", "arm")] {
-            let pod = render_with(&config(), 1, arch, None).unwrap();
-            let selector = spec(&pod).node_selector.as_ref().unwrap();
-            assert_eq!(selector["kubernetes.io/arch"], oci);
-            assert_eq!(selector["kubernetes.io/os"], "linux");
-            assert_eq!(
-                pod.metadata.labels.as_ref().unwrap()["aurcache.io/arch"],
-                arch
-            );
-        }
-    }
-
-    #[test]
     fn an_architecture_without_a_name_is_an_error() {
         let error = render_with(&config(), 1, "sparc", None).unwrap_err();
         assert!(error.to_string().contains("sparc"), "{error}");
     }
 
+    /// Every pod has a deadline, a generous one when its build has none.
     #[test]
     fn the_deadline_follows_the_timeout() {
-        let none = render_with(&config(), 1, "x86_64", None).unwrap();
-        assert_eq!(spec(&none).active_deadline_seconds, None);
         let pod = render_with(&config(), 1, "x86_64", Some(60)).unwrap();
         assert_eq!(spec(&pod).active_deadline_seconds, Some(360));
+        let none = render_with(&config(), 1, "x86_64", None).unwrap();
+        assert_eq!(spec(&none).active_deadline_seconds, Some(24 * 3600 + 300));
     }
 
     /// A ResourceQuota on a compute resource refuses a pod with a container
@@ -631,7 +559,7 @@ mod tests {
     #[test]
     fn nothing_is_limited_unless_a_limit_is_set() {
         let pod = pod(&config());
-        assert_eq!(container(&pod, BUILD).resources, None);
+        assert_eq!(build_container(&pod).resources, None);
         let work = &spec(&pod).volumes.as_ref().unwrap()[0];
         assert_eq!(work.empty_dir.as_ref().unwrap().size_limit, None);
     }
@@ -642,7 +570,7 @@ mod tests {
             let mut cfg = config();
             cfg.tunables = tunables;
             let pod = pod(&cfg);
-            let resources = container(&pod, BUILD).resources.clone().unwrap();
+            let resources = build_container(&pod).resources.clone().unwrap();
             let requests = resources.requests.unwrap();
             let limits = resources.limits.unwrap();
             assert_eq!(requests, limits);
@@ -668,62 +596,10 @@ mod tests {
     }
 
     #[test]
-    fn the_disk_limit_bounds_the_work_volume_too() {
-        let pod = pod(&limited());
-        let work = &spec(&pod).volumes.as_ref().unwrap()[0];
-        assert_eq!(work.name, "work");
-        let size = work.empty_dir.as_ref().unwrap().size_limit.as_ref();
-        assert_eq!(size.unwrap().0, (30u64 << 30).to_string());
-    }
-
-    fn credential() -> aurcache_worker_container::ssh::CredentialFiles {
-        aurcache_worker_container::ssh::CredentialFiles {
-            key: "/etc/aurcache/ssh/ssh-privatekey".into(),
-            known_hosts: "/etc/aurcache/ssh/known_hosts".into(),
-        }
-    }
-
-    /// The SSH key stays with the dispatcher: a pod of a dispatcher that
-    /// holds one is the pod of one that does not, with no Secret in it.
-    #[test]
-    fn the_credential_never_reaches_a_pod() {
-        let mut cfg = config();
-        cfg.credential = Some(credential());
-        let with = pod(&cfg);
-        assert_eq!(
-            serde_json::to_value(&with).unwrap(),
-            serde_json::to_value(pod(&config())).unwrap()
-        );
-        assert!(
-            spec(&with)
-                .volumes
-                .iter()
-                .flatten()
-                .all(|v| v.secret.is_none())
-        );
-    }
-
-    /// What an exec names is what `stage` and `hold` themselves run.
-    #[test]
-    fn the_agent_is_named_where_stage_and_hold_run_it() {
-        let pod = pod(&config());
-        for which in [STAGE, HOLD] {
-            let command = container(&pod, which).command.as_ref().unwrap();
-            assert_eq!(command[0], agent_path(), "{which}");
-        }
-        assert!(agent_path().ends_with(layout::BIN_NAME));
-    }
-
-    #[test]
     fn the_operators_template_sits_under_ours() {
         let mut cfg = config();
         cfg.extras = serde_json::from_value(json!({
             "nodeSelector": {"pool": "builds", "kubernetes.io/arch": "s390x"},
-            "labels": {"team": "a", "aurcache.io/dispatcher": "other"},
-            "annotations": {"note": "x"},
-            "priorityClassName": "low",
-            "runtimeClassName": "gvisor",
-            "schedulerName": "custom",
             "tolerations": [{"key": "builds", "operator": "Exists"}],
             "imagePullSecrets": [{"name": "pull"}],
         }))
@@ -733,13 +609,6 @@ mod tests {
         let selector = spec.node_selector.as_ref().unwrap();
         assert_eq!(selector["pool"], "builds");
         assert_eq!(selector["kubernetes.io/arch"], "amd64");
-        let labels = pod.metadata.labels.as_ref().unwrap();
-        assert_eq!(labels["team"], "a");
-        assert_eq!(labels["aurcache.io/dispatcher"], "abcdef0123456789");
-        assert_eq!(pod.metadata.annotations.as_ref().unwrap()["note"], "x");
-        assert_eq!(spec.priority_class_name.as_deref(), Some("low"));
-        assert_eq!(spec.runtime_class_name.as_deref(), Some("gvisor"));
-        assert_eq!(spec.scheduler_name.as_deref(), Some("custom"));
         assert_eq!(spec.tolerations.as_ref().unwrap().len(), 1);
         assert_eq!(spec.image_pull_secrets.as_ref().unwrap()[0].name, "pull");
     }
@@ -779,7 +648,7 @@ mod tests {
     #[test]
     fn no_combination_renders_what_baseline_forbids() {
         let template = serde_json::from_value::<PodExtras>(json!({
-            "nodeSelector": {"a": "b"}, "labels": {"c": "d"},
+            "nodeSelector": {"a": "b"},
             "tolerations": [{"operator": "Exists"}],
         }))
         .unwrap();
@@ -830,20 +699,5 @@ mod tests {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
             assert!(value.len() <= 63 && alphabet, "{key}={value}");
         }
-    }
-
-    #[test]
-    fn the_agent_comes_from_the_given_image_in_stage_and_hold() {
-        let pod = pod(&config());
-        for which in [STAGE, HOLD] {
-            assert_eq!(
-                container(&pod, which).image.as_deref(),
-                Some("reg/agent@sha256:1")
-            );
-        }
-        assert_eq!(
-            container(&pod, BUILD).image.as_deref(),
-            Some("reg/builder:1")
-        );
     }
 }

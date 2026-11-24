@@ -8,6 +8,7 @@
         "code": 0
       }
     },
+    "log_size": 123456,
     "artifacts": [
       {
         "name": "hello-1.0-1-x86_64.pkg.tar.zst",
@@ -22,6 +23,7 @@
   {
     "interface": 1,
     "report": null,
+    "log_size": 0,
     "artifacts": []
   }
 ]

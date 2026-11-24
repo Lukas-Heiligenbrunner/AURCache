@@ -157,6 +157,7 @@ fn handbacks() -> Vec<Handback> {
         Handback {
             interface: INTERFACE,
             report: Some(report(Ended::Exited { code: 0 })),
+            log_size: 123_456,
             artifacts: vec![
                 artifact("hello-1.0-1-x86_64.pkg.tar.zst", 4096),
                 artifact("hello-docs-1.0-1-any.pkg.tar.zst", 0),
@@ -165,6 +166,7 @@ fn handbacks() -> Vec<Handback> {
         Handback {
             interface: INTERFACE,
             report: None,
+            log_size: 0,
             artifacts: Vec::new(),
         },
     ]

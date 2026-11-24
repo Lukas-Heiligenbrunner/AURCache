@@ -1,6 +1,7 @@
-//! Say what the build left: its report, and each package's name and size.
+//! Say what the build left: its report, its log's length, and each package's
+//! name and size.
 
-use aurcache_build_agent::layout::{OUT_DIR, PKG_DIR, REPORT_FILE, Work};
+use aurcache_build_agent::layout::{LOG_DIR, LOG_FILE, OUT_DIR, PKG_DIR, REPORT_FILE, Work};
 use aurcache_build_agent::report::{Artifact, BuildReport, Handback};
 use aurcache_build_agent::spec::INTERFACE;
 use aurcache_common::beneath::Dir;
@@ -15,6 +16,7 @@ pub fn run(work: &Work) -> io::Result<()> {
     let handback = Handback {
         interface: INTERFACE,
         report: report(&root)?,
+        log_size: log_size(&root)?,
         artifacts: artifacts(&root)?,
     };
     let mut line = serde_json::to_vec(&handback)?;
@@ -35,6 +37,15 @@ fn report(root: &Dir) -> io::Result<Option<BuildReport>> {
         return Ok(None);
     };
     Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+/// The length of the build log; 0 when there is none.
+fn log_size(root: &Dir) -> io::Result<u64> {
+    match root.dir(LOG_DIR).and_then(|dir| dir.file(LOG_FILE)) {
+        Ok(file) => Ok(file.metadata()?.len()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
 }
 
 /// The regular files in `pkg/`, sorted by name. A `pkg/` that is not a
@@ -66,7 +77,7 @@ fn artifacts(root: &Dir) -> io::Result<Vec<Artifact>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{artifacts, report};
+    use super::{artifacts, log_size, report};
     use aurcache_build_agent::layout::Work;
     use aurcache_build_agent::report::Artifact;
     use aurcache_common::beneath::Dir;
@@ -145,6 +156,10 @@ mod tests {
         let root = Dir::open(dir.path()).unwrap();
         assert!(artifacts(&root).unwrap().is_empty());
         assert!(report(&root).unwrap().is_none());
+        assert_eq!(log_size(&root).unwrap(), 0);
+        std::fs::create_dir(work.log().parent().unwrap()).unwrap();
+        std::fs::write(work.log(), b"a log").unwrap();
+        assert_eq!(log_size(&root).unwrap(), 5);
         std::fs::create_dir(work.out()).unwrap();
         std::fs::write(work.report(), b"{").unwrap();
         assert!(report(&root).is_err());

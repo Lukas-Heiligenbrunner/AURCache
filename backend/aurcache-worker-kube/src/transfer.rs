@@ -8,7 +8,6 @@
 //! body as the upload asks for them, and are counted on the way.
 
 use crate::cluster::{Cluster, Exec, ExecEnd, Stdin};
-use crate::outcome::{Observed, observe};
 use crate::pod::{self, BUILD, HOLD, STAGE, WORK};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use aurcache_build_agent::report::{Artifact, Handback};
@@ -17,14 +16,15 @@ use aurcache_worker_container::input::Packed;
 use aurcache_worker_container::ssh::link;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::protocol::PackagesRefused;
-use std::io;
+use std::convert::Infallible;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::task::{Context as TaskContext, Poll, ready};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio_util::io::InspectReader;
 
 /// The most a manifest may be. It is a line per package and a report of a
 /// few lines; anything near this is not one.
@@ -34,11 +34,12 @@ const MANIFEST_LIMIT: u64 = 4 * 1024 * 1024;
 const MANIFEST_TIME: Duration = Duration::from_secs(5 * 60);
 /// The most log held back while waiting for the end of a line.
 const LINE_CAP: usize = 64 * 1024;
-/// How long to wait before following the log again after its stream broke.
+/// How long to wait before following the log again after a `tail` ended.
 const RESUME_DELAY: Duration = Duration::from_secs(2);
-/// How long a `send` whose bytes were all taken may take to end.
-const SEND_END: Duration = Duration::from_secs(60);
-/// How much of a package is read at once when nothing else sizes the read.
+/// How long a `send` may pass no byte before it is given up: the upload has
+/// no deadline of its own, and a stalled one would hold its build's slot.
+const SEND_IDLE: Duration = Duration::from_secs(5 * 60);
+/// How much of the log is read at once.
 const CHUNK: usize = 64 * 1024;
 
 /// Where a build's packages go.
@@ -146,101 +147,76 @@ impl<C: Cluster> Agent<'_, C> {
         Ok(served?)
     }
 
-    /// Follow the build log into `log` from where `lines` is, until the
-    /// build is over and the log was read to its end: until a `tail` that
-    /// succeeds has nothing more to send. A stream that breaks is taken up
-    /// again from the last byte received.
+    /// Follow the build log into `log` from where `lines` is, taking a
+    /// broken stream up again from the last byte received. Never ends:
+    /// whoever knows the build container ended drops it, and reads the rest
+    /// with [`Self::follow_to`].
+    pub async fn follow(&self, lines: &Mutex<Lines>, log: &mpsc::Sender<String>) -> Infallible {
+        loop {
+            if let Err(error) = self.tail(lines, log, u64::MAX).await {
+                tracing::debug!("following the log of {} broke: {error:#}", self.pod);
+            }
+            tokio::time::sleep(RESUME_DELAY).await;
+        }
+    }
+
+    /// Follow the build log until `size` bytes of it, its whole length as
+    /// the manifest gives it, have arrived. A `tail` may end in success
+    /// short of that (see [`ExecEnd::Succeeded`]), so only the count says
+    /// the log is whole.
+    pub async fn follow_to(&self, lines: &Mutex<Lines>, log: &mpsc::Sender<String>, size: u64) {
+        while lock(lines).received() < size {
+            if let Err(error) = self.tail(lines, log, size).await {
+                tracing::debug!("reading the log of {} broke: {error:#}", self.pod);
+            }
+            if lock(lines).received() < size {
+                tokio::time::sleep(RESUME_DELAY).await;
+            }
+        }
+    }
+
+    /// One `tail` from where `lines` is, until its stream ends or `until`
+    /// bytes of the log have arrived.
     ///
-    /// Never ends for a build that left no report: whoever knows the build
-    /// container ended stops waiting for this.
-    pub async fn follow(&self, lines: &Mutex<Lines>, log: &mpsc::Sender<String>) {
-        if self.until_followable().await == Followable::Never {
-            return std::future::pending().await;
-        }
-        loop {
-            match self.tail(lines, log).await {
-                // Only a tail that had nothing more to send says the log was
-                // read to its end: one that sent something may have been cut
-                // short and still succeeded, so another follows it from
-                // where it stopped.
-                Tail::Ended { bytes: 0 } => return,
-                Tail::Ended { .. } => {}
-                Tail::Broken { message } => {
-                    tracing::debug!("following the log of {} broke: {message}", self.pod);
-                    tokio::time::sleep(RESUME_DELAY).await;
-                }
-            }
-        }
-    }
-
-    /// Wait for `hold` to run, which is the container the log is read
-    /// through.
-    async fn until_followable(&self) -> Followable {
-        let mut generation = self.cluster.generation();
-        loop {
-            let followable = self
-                .cluster
-                .pod(self.pod)
-                .is_some_and(|pod| match observe(&pod) {
-                    Observed::Building { hold_runs, .. } => hold_runs,
-                    Observed::Built(_) => true,
-                    _ => false,
-                });
-            if followable {
-                return Followable::Now;
-            }
-            if generation.changed().await.is_err() {
-                return Followable::Never;
-            }
-        }
-    }
-
-    /// One `tail` from where `lines` is, to the end of its stream.
-    async fn tail(&self, lines: &Mutex<Lines>, log: &mpsc::Sender<String>) -> Tail {
-        let from = lock(lines).received().to_string();
-        let argv = [self.bin, "tail", "--work", WORK, "--from", &from];
-        let exec = match self
+    /// Safe to drop at any await: bytes count as received only once they
+    /// are passed on, and the next `tail` starts from there.
+    async fn tail(
+        &self,
+        lines: &Mutex<Lines>,
+        log: &mpsc::Sender<String>,
+        until: u64,
+    ) -> Result<()> {
+        let from = lock(lines).received();
+        let from_arg = from.to_string();
+        let argv = [self.bin, "tail", "--work", WORK, "--from", &from_arg];
+        let Exec { stdout, ended, .. } = self
             .cluster
             .exec(self.pod, HOLD, &argv, Stdin::Closed)
-            .await
-        {
-            Ok(exec) => exec,
-            Err(error) => {
-                return Tail::Broken {
-                    message: format!("{error:#}"),
-                };
-            }
-        };
-        let Exec {
-            mut stdout, ended, ..
-        } = exec;
+            .await?;
+        let mut stdout = stdout.take(until.saturating_sub(from));
         let mut chunk = vec![0; CHUNK];
-        let mut bytes = 0u64;
         loop {
-            match stdout.read(&mut chunk).await {
-                Ok(0) => break,
-                Ok(read) => {
-                    bytes += read as u64;
-                    let text = lock(lines).feed(&chunk[..read]);
-                    if let Some(text) = text {
-                        let _ = log.send(text).await;
-                    }
-                }
-                Err(error) => {
-                    return Tail::Broken {
-                        message: error.to_string(),
-                    };
-                }
+            let read = stdout.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            let permit = log.reserve().await.ok();
+            let text = lock(lines).feed(&chunk[..read]);
+            if let (Some(permit), Some(text)) = (permit, text) {
+                permit.send(text);
             }
         }
+        if lock(lines).received() >= until {
+            return Ok(());
+        }
         match ended.await {
-            ExecEnd::Succeeded => Tail::Ended { bytes },
-            ExecEnd::Failed { message } | ExecEnd::Lost { message } => Tail::Broken { message },
+            ExecEnd::Succeeded => Ok(()),
+            ExecEnd::Failed { message } | ExecEnd::Lost { message } => bail!("{message}"),
         }
     }
 
-    /// What the build left: its report, and each package's name and size,
-    /// within [`MANIFEST_TIME`].
+    /// What the build left: its report, its log's length, and each
+    /// package's name and size, within [`MANIFEST_TIME`].
     pub async fn manifest(&self) -> Result<Handback> {
         tokio::time::timeout(MANIFEST_TIME, self.read_manifest())
             .await
@@ -309,7 +285,8 @@ impl<C: Cluster> Agent<'_, C> {
             .with_context(|| format!("again, after a first attempt failed ({first:#})"))
     }
 
-    /// One `send` into one upload, checked against the manifest.
+    /// One `send` into one upload, checked against the manifest, and given
+    /// up once no byte has passed for [`SEND_IDLE`].
     async fn send<U: Uploads>(
         &self,
         uploads: &U,
@@ -323,53 +300,63 @@ impl<C: Cluster> Agent<'_, C> {
             .cluster
             .exec(self.pod, HOLD, &argv, Stdin::Closed)
             .await?;
-        let passing = Arc::new(Mutex::new(Passing::new(stdout)));
-        uploads
-            .upload(
-                build_id,
-                &artifact.name,
-                Body(Arc::clone(&passing)),
-                artifact.size,
-            )
-            .await?;
-        // An upload takes the bytes it declared and may stop there; the
-        // stream is read on to its end, so that anything past them is seen
-        // and the process is never left writing into a closed pipe.
-        let finish = async {
-            let tally = Body(passing).finish(artifact.size).await?;
+        let passed = Arc::new(AtomicU64::new(0));
+        let body = counted(stdout, Arc::clone(&passed));
+        let relay = async {
+            uploads
+                .upload(build_id, &artifact.name, body, artifact.size)
+                .await?;
             match ended.await {
-                ExecEnd::Succeeded => Ok(tally),
+                ExecEnd::Succeeded => Ok(()),
                 ExecEnd::Failed { message } | ExecEnd::Lost { message } => {
                     Err(anyhow!("the pod's send ended badly: {message}"))
                 }
             }
         };
-        let tally = tokio::time::timeout(SEND_END, finish)
-            .await
-            .map_err(|_| anyhow!("the pod's send did not end after its bytes were taken"))??;
-        // A send that succeeded may still have been cut short (see
-        // [`ExecEnd::Succeeded`]): the count against the manifest is what
-        // says the file arrived whole.
-        tally.check(artifact)
+        tokio::select! {
+            relayed = relay => relayed?,
+            () = stalled(&passed) => bail!(
+                "no byte of {} passed for {} minutes",
+                artifact.name,
+                SEND_IDLE.as_secs() / 60
+            ),
+        }
+        // The upload declares the manifest's size, and a body that ends
+        // short of it fails the request. A send that succeeded may still
+        // have been cut short (see [`ExecEnd::Succeeded`]), so the count
+        // is checked too.
+        let bytes = passed.load(Ordering::Relaxed);
+        ensure!(
+            bytes == artifact.size,
+            "{} arrived as {bytes} bytes, and the pod's manifest says {}",
+            artifact.name,
+            artifact.size
+        );
+        Ok(())
     }
 }
 
-/// Whether the log can be followed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Followable {
-    Now,
-    /// The watch on pods is over, so nothing will ever say when.
-    Never,
+/// `stdout`, adding to `passed` each byte read from it.
+fn counted(
+    stdout: Pin<Box<dyn AsyncRead + Send>>,
+    passed: Arc<AtomicU64>,
+) -> impl AsyncRead + Send + Unpin + 'static {
+    InspectReader::new(stdout, move |bytes: &[u8]| {
+        passed.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    })
 }
 
-/// How one `tail` ended.
-enum Tail {
-    /// It exited 0 having sent `bytes` bytes: the build is over and the log
-    /// was read to its end, unless the stream was cut short and still ended
-    /// in success (see [`ExecEnd::Succeeded`]).
-    Ended { bytes: u64 },
-    /// The stream ended some other way; what was read still counts.
-    Broken { message: String },
+/// Resolves once `passed` has not moved for a whole [`SEND_IDLE`].
+async fn stalled(passed: &AtomicU64) {
+    let mut last = passed.load(Ordering::Relaxed);
+    loop {
+        tokio::time::sleep(SEND_IDLE).await;
+        let now = passed.load(Ordering::Relaxed);
+        if now == last {
+            return;
+        }
+        last = now;
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -430,78 +417,6 @@ fn whole_characters(bytes: &[u8]) -> usize {
     }
 }
 
-/// A package on its way through: the stream it comes from, and what has
-/// passed so far.
-struct Passing {
-    stdout: Pin<Box<dyn AsyncRead + Send>>,
-    bytes: u64,
-}
-
-impl Passing {
-    fn new(stdout: Pin<Box<dyn AsyncRead + Send>>) -> Self {
-        Self { stdout, bytes: 0 }
-    }
-}
-
-/// What passed, once the stream is over.
-struct Tally {
-    bytes: u64,
-}
-
-impl Tally {
-    /// Fail unless this is exactly the file the manifest describes.
-    fn check(&self, artifact: &Artifact) -> Result<()> {
-        ensure!(
-            self.bytes == artifact.size,
-            "{} arrived as {} bytes, and the pod's manifest says {}",
-            artifact.name,
-            self.bytes,
-            artifact.size
-        );
-        Ok(())
-    }
-}
-
-/// A handle on a package passing through, for whoever reads it next: the
-/// upload first, then the relay itself for whatever the upload left.
-struct Body(Arc<Mutex<Passing>>);
-
-impl AsyncRead for Body {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let mut passing = lock(&self.0);
-        let before = buf.filled().len();
-        ready!(passing.stdout.as_mut().poll_read(cx, buf))?;
-        passing.bytes += (buf.filled().len() - before) as u64;
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl Body {
-    /// Read the stream to its end and say what passed in all. Gives up as
-    /// soon as more than `expected` bytes have: nothing past them is a
-    /// package's.
-    async fn finish(mut self, expected: u64) -> Result<Tally> {
-        let mut chunk = vec![0; CHUNK];
-        loop {
-            let passed = lock(&self.0).bytes;
-            ensure!(
-                passed <= expected,
-                "the pod sent more than the {expected} bytes its manifest says"
-            );
-            if self.read(&mut chunk).await.context("reading the package")? == 0 {
-                break;
-            }
-        }
-        Ok(Tally {
-            bytes: lock(&self.0).bytes,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,39 +473,5 @@ mod tests {
         let text = fed(&mut lines, &vec![0xff; LINE_CAP]);
         assert_eq!(text.chars().count(), LINE_CAP);
         assert_eq!(lines.flush(), None);
-    }
-
-    fn artifact(bytes: &[u8]) -> Artifact {
-        Artifact {
-            name: "p-1-1-x86_64.pkg.tar.zst".to_string(),
-            size: bytes.len() as u64,
-        }
-    }
-
-    fn body(bytes: &'static [u8]) -> Body {
-        Body(Arc::new(Mutex::new(Passing::new(Box::pin(bytes)))))
-    }
-
-    /// Whoever read which part, the tally is of the whole stream.
-    #[tokio::test]
-    async fn the_tally_covers_what_the_upload_read_and_what_it_left() {
-        let bytes = b"0123456789";
-        let mut upload = body(bytes);
-        let rest = Body(Arc::clone(&upload.0));
-        let mut taken = [0; 4];
-        upload.read_exact(&mut taken).await.unwrap();
-        let tally = rest.finish(10).await.unwrap();
-        tally.check(&artifact(bytes)).unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_stream_that_is_not_the_manifests_file_is_refused() {
-        let expected = artifact(b"0123456789");
-        let short = body(b"01234").finish(10).await.unwrap();
-        let message = short.check(&expected).unwrap_err().to_string();
-        assert!(message.contains("5 bytes"), "{message}");
-
-        let long = body(b"0123456789 and more").finish(10).await;
-        assert!(long.is_err());
     }
 }

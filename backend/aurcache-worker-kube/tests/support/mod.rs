@@ -11,8 +11,6 @@
 // Each test binary uses its own part of this.
 #![allow(dead_code)]
 
-pub mod server;
-
 use anyhow::{Result, bail};
 use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback};
 use aurcache_build_agent::spec::INTERFACE;
@@ -21,7 +19,7 @@ use aurcache_worker_container::input::Packed;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{PackagesRefused, Timeout, TimeoutSource};
 use aurcache_worker_kube::cluster::{Cluster, CreateError, Exec, ExecEnd, Stdin, Sweep};
-use aurcache_worker_kube::config::{Config, PodExtras, PullPolicy, Tunables};
+use aurcache_worker_kube::config::{Config, PodExtras, Tunables};
 use aurcache_worker_kube::executor::{Build, KubeExecutor};
 use aurcache_worker_kube::transfer::Uploads;
 use futures::FutureExt;
@@ -655,6 +653,7 @@ impl FakeCluster {
             let handback = Handback {
                 interface: INTERFACE,
                 report: script.report.clone(),
+                log_size: script.log.len() as u64,
                 artifacts: script.packages.iter().map(Package::artifact).collect(),
             };
             serde_json::to_string(&handback).unwrap() + "\n"
@@ -1032,7 +1031,7 @@ pub fn config() -> Config {
         namespace: "aurcache-builds".to_string(),
         dispatcher: DISPATCHER.to_string(),
         builder_image: "registry.example/builder:latest".to_string(),
-        pull_policy: PullPolicy::Always,
+        pull_policy: "Always".to_string(),
         agent_image: AGENT_IMAGE.to_string(),
         credential: None,
         extras: PodExtras::default(),

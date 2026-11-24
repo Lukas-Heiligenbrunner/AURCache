@@ -5,18 +5,17 @@
 //! - `stage` installs this binary where the build container runs it, and
 //!   keeps its container up until `receive` has taken the job and exited.
 //! - `receive` reads the job from stdin ([`aurcache_build_agent::handin`]).
-//! - `hold` keeps the pod up for the hand-back, until it is told to stop.
 //! - `tail` writes the build log from an offset, following it until the
 //!   report exists and the log was written to its end.
-//! - `manifest` prints a `Handback`: the report, and the regular files in
-//!   `pkg/` with their sizes. `send` writes one of them to stdout.
+//! - `manifest` prints a `Handback`: the report, the log's length, and the
+//!   regular files in `pkg/` with their sizes. `send` writes one of them to
+//!   stdout.
 //!
 //! Each exits 0 when it did what it was asked, and 1 otherwise, saying why on
 //! stderr; stdout carries only the payload. What the build left is opened
 //! with `aurcache_common::beneath`: root in the build container could have
 //! put a link or a pipe at any name.
 
-mod hold;
 mod manifest;
 mod receive;
 mod send;
@@ -37,10 +36,6 @@ pub fn stage(work: &Path, tools: &Path) -> ExitCode {
 
 pub fn receive(work: &Path) -> ExitCode {
     finish(receive::run(&Work::new(work), &mut io::stdin().lock()))
-}
-
-pub fn hold() -> ExitCode {
-    finish(hold::run())
 }
 
 pub fn tail(work: &Path, from: u64) -> ExitCode {

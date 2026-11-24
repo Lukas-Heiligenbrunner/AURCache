@@ -18,8 +18,9 @@ pub mod keys {
     pub const KEYSERVER: &str = "keyserver";
 }
 
-/// How long a build pod may stay unschedulable when nothing says otherwise.
-pub const DEFAULT_SCHEDULE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// How long a build pod may take to start when nothing says otherwise: long
+/// enough for a node to be added and the builder image pulled on it.
+pub const DEFAULT_SCHEDULE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// The settings this worker accepts, on top of the protocol ones.
 #[must_use]
@@ -65,8 +66,9 @@ pub fn kube_settings() -> Vec<SettingSpec> {
             key: keys::SCHEDULE_TIMEOUT,
             env_var: "WORKER_KUBE_SCHEDULE_TIMEOUT",
             kind: ValueKind::Duration,
-            description: "How long a build pod may wait for a node, and then how long it \
-                          may take to start on it, before the build is handed back.",
+            description: "How long a build pod may take from its creation until its build \
+                          runs: waiting for a node, pulling the images, and taking the job. \
+                          Past it, the build is handed back.",
             category: "Build limits",
             applies: Applies::NextJob,
             default: Builtin::Duration(DEFAULT_SCHEDULE_TIMEOUT),

@@ -85,6 +85,9 @@ pub struct Handback {
     pub interface: u32,
     /// `None` when the build container ended without writing one.
     pub report: Option<BuildReport>,
+    /// The build log's length in bytes, 0 when there is none: where a worker
+    /// that follows the log knows it has all of it.
+    pub log_size: u64,
     pub artifacts: Vec<Artifact>,
 }
 

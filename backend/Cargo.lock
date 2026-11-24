@@ -1081,28 +1081,20 @@ name = "aurcache-worker-kube"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "aurcache-activitylog",
- "aurcache-api",
  "aurcache-build-agent",
- "aurcache-ca",
  "aurcache-common",
- "aurcache-db",
- "aurcache-utils",
  "aurcache-worker-container",
  "aurcache-worker-core",
  "futures",
  "k8s-openapi",
  "kube",
  "rustls 0.23.46",
- "sea-orm",
  "serde",
  "serde_json",
- "tar",
  "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
- "zstd",
 ]
 
 [[package]]

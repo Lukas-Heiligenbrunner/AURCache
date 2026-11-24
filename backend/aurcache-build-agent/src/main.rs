@@ -40,8 +40,6 @@ enum Command {
         #[arg(long)]
         work: PathBuf,
     },
-    /// Keep the container up until it is told to stop.
-    Hold,
     /// Write the build log from an offset, following it until the build ends.
     Tail {
         #[arg(long)]
@@ -49,7 +47,8 @@ enum Command {
         #[arg(long)]
         from: u64,
     },
-    /// Print the report and the packages' names and sizes, as JSON.
+    /// Print the report, the log's length and the packages' names and sizes,
+    /// as JSON.
     Manifest {
         #[arg(long)]
         work: PathBuf,
@@ -75,7 +74,6 @@ fn main() -> ExitCode {
         Command::Build { work, log_file } => agent::build::run(&work, log_file.as_deref()),
         Command::Stage { work, tools } => agent::transfer::stage(&work, &tools),
         Command::Receive { work } => agent::transfer::receive(&work),
-        Command::Hold => agent::transfer::hold(),
         Command::Tail { work, from } => agent::transfer::tail(&work, from),
         Command::Manifest { work } => agent::transfer::manifest(&work),
         Command::Send { work, name } => agent::transfer::send(&work, &name),

@@ -3,9 +3,9 @@
 //!
 //! In order: the pod is created; the job is handed in once its `stage`
 //! container runs; the log is followed while the build container runs; when
-//! that container has ended, what it left is read and each package is
-//! relayed to the server. Whatever happens on the way, the pod is deleted
-//! before the report is returned.
+//! that container has ended, what it left is read, the log is read to the
+//! length it gives, and each package is relayed to the server. Whatever
+//! happens on the way, the pod is deleted before the report is returned.
 
 use crate::cluster::{Cluster, CreateError, Sweep};
 use crate::config::Config;
@@ -33,7 +33,6 @@ use aurcache_worker_core::ssh_key;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Fuse, FusedFuture};
 use k8s_openapi::api::core::v1::Pod;
-use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -44,12 +43,9 @@ use tokio::time::Instant;
 const GRACE: Duration = Duration::from_secs(5);
 /// How long to wait before trying a failed delete again.
 const DELETE_RETRY: Duration = Duration::from_secs(5);
-/// How long the log may take to reach its end once the build container has
-/// ended with a report, which is when `tail` ends by itself.
+/// How long the rest of the log may take to arrive once the build container
+/// has ended.
 const LOG_END: Duration = Duration::from_secs(60);
-/// How long the log is read on once the build container has ended without a
-/// report, when nothing says where its end is.
-const LOG_DRAIN: Duration = Duration::from_secs(3);
 /// How many of the build container's last lines are copied into the build
 /// log when it ended without a report.
 const LAST_LINES: i64 = 20;
@@ -58,9 +54,6 @@ const LAST_LINES: i64 = 20;
 const SCRATCH: &str = "scratch";
 /// The build that the startup dry run asks about: an id no build has.
 const PROBE_BUILD: i32 = 0;
-/// The timeout of the dry run's pod, so that a quota scoped to pods with a
-/// deadline counts it as it counts a build's.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// Builds each job in a pod of its own.
 pub struct KubeExecutor<C: Cluster> {
@@ -147,8 +140,8 @@ impl<C: Cluster> KubeExecutor<C> {
         self.run(&cfg, &pod, build).await
     }
 
-    /// Create the pod, see the build through in it, and delete it: on every
-    /// way out, a panic of this task's own making included.
+    /// Create the pod, see the build through in it, and delete it. A panic
+    /// leaves the pod to its deadline: the runner reports the build.
     async fn run<U: Uploads>(
         &self,
         cfg: &Config,
@@ -158,11 +151,13 @@ impl<C: Cluster> KubeExecutor<C> {
         let watch = build.claimed.watch();
         let name = pod::name(&cfg.dispatcher, build.claimed.job.build_id);
         let input = std::mem::take(&mut build.input);
-        let attended = AssertUnwindSafe(self.attend(cfg, pod, &name, &build, input, &watch))
-            .catch_unwind()
+        let lines = Mutex::new(Lines::default());
+        let attended = self
+            .attend(cfg, pod, &name, &build, input, &lines, &watch)
             .await;
+        flush(&lines, &build.log).await;
         self.delete(&name).await;
-        attended.unwrap_or_else(|panic| resume_unwind(panic))
+        attended
     }
 
     /// Delete a build's pod, trying once more when that fails. A pod left
@@ -184,6 +179,7 @@ impl<C: Cluster> KubeExecutor<C> {
     ///
     /// A timeout bounds the build itself: once the build container has ended
     /// it no longer applies, and only a cancellation stops the hand-back.
+    #[allow(clippy::too_many_arguments)]
     async fn attend<U: Uploads>(
         &self,
         cfg: &Config,
@@ -191,6 +187,7 @@ impl<C: Cluster> KubeExecutor<C> {
         name: &str,
         build: &Build<'_, U>,
         input: Packed,
+        lines: &Mutex<Lines>,
         watch: &StopWatch,
     ) -> Result<CompleteReport> {
         // A build stopped before it has a pod gets none.
@@ -213,30 +210,18 @@ impl<C: Cluster> KubeExecutor<C> {
             pod: name,
             bin: &bin,
         };
-        let lines = Mutex::new(Lines::default());
         let reached = tokio::select! {
             biased;
-            reached = self.until_built(cfg, &agent, build, input, &lines, watch) => Ok(reached),
-            stop = watch.stopped() => Err(stop),
+            reached = self.until_built(cfg, &agent, build, input, lines, watch) => reached?,
+            stop = watch.stopped() => return Ok(stopped(stop, watch)),
         };
-        let rest = lock(&lines).flush();
-        if let Some(mut rest) = rest {
-            // What the dispatcher says next starts a line of its own.
-            if !rest.ends_with('\n') {
-                rest.push('\n');
-            }
-            say(&build.log, &rest).await;
-        }
         let end = match reached {
-            Err(stop) => return Ok(stopped(stop, watch)),
-            Ok(reached) => match reached? {
-                Reached::Over(report) => return Ok(report),
-                Reached::Built(end) => end,
-            },
+            Reached::Over(report) => return Ok(report),
+            Reached::Built(end) => end,
         };
         tokio::select! {
             biased;
-            report = self.hand_back(cfg, &agent, build, &end, watch) => Ok(report),
+            report = self.hand_back(cfg, &agent, build, &end, lines, watch) => Ok(report),
             () = build.claimed.cancel.cancelled() => Ok(stopped(Stop::Canceled, watch)),
         }
     }
@@ -244,11 +229,11 @@ impl<C: Cluster> KubeExecutor<C> {
     /// Hand the job to the pod, once it can take it, and follow the build
     /// until its container has ended or the pod is lost.
     ///
-    /// Each wait before the build runs gets the schedule timeout: for a node,
-    /// for the pod to start on it, for the hand-in, and for the build
-    /// container to start once the job is in. None of them is the build's own time, and a pod that
-    /// cannot start (an image that will not pull, a volume that will not
-    /// mount) often says so only in events.
+    /// The build must run within the schedule timeout of the pod's creation:
+    /// waiting for a node, pulling the images and taking the job are none of
+    /// them the build's own time, and a pod that cannot start (an image that
+    /// will not pull, a volume that will not mount) often says so only in
+    /// events.
     async fn until_built<U: Uploads>(
         &self,
         cfg: &Config,
@@ -259,19 +244,25 @@ impl<C: Cluster> KubeExecutor<C> {
         watch: &StopWatch,
     ) -> Result<Reached> {
         let log = &build.log;
+        let timeout = cfg.tunables.schedule_timeout;
+        let started_by = Instant::now() + timeout;
+        let unstarted =
+            |last: &str| Reached::Over(outcome::unstarted(timeout, last, &cfg.namespace));
         let mut status = Status::new(agent.pod, self.cluster.generation());
-        if let Some(over) = self.until_staged(cfg, build, &mut status, watch).await? {
-            return Ok(Reached::Over(over));
+        if let Some(over) = self
+            .until_staged(cfg, build, &mut status, started_by, watch)
+            .await?
+        {
+            return Ok(over);
         }
         say(log, "[worker] handing the job to the pod\n").await;
-        let timeout = cfg.tunables.schedule_timeout;
         // Once, and never again: a second hand-in is refused by the agent,
         // and after a failed one nobody knows whether a build started.
-        let handed = tokio::time::timeout(timeout, agent.receive(&input)).await;
+        let handed = tokio::time::timeout_at(started_by, agent.receive(&input)).await;
         // The pod has it now, or never will: the build may run for hours.
         drop(input);
         match handed {
-            Err(_) => return Ok(Reached::Over(outcome::unreceived_past(timeout))),
+            Err(_) => return Ok(unstarted("the job was being handed to the pod")),
             Ok(Err(error)) => {
                 return Ok(Reached::Over(report::interrupted(format!(
                     "handing the job to the build pod failed: {error:#}"
@@ -280,18 +271,16 @@ impl<C: Cluster> KubeExecutor<C> {
             Ok(Ok(())) => {}
         }
 
-        let started_by = Instant::now() + timeout;
         let mut started = false;
         let follow = agent.follow(lines, log);
         tokio::pin!(follow);
-        let mut followed = false;
         // The SSH link, opened once the build container runs, for the
         // whole build. It ends with the build container.
         let mut link: Fuse<BoxFuture<'_, Result<()>>> = Fuse::terminated();
-        let end = loop {
+        loop {
             match status.read(&*self.cluster, log).await {
                 Seen::Gone => return Ok(Reached::Over(outcome::gone())),
-                Seen::Pod(Observed::Built(end)) => break end,
+                Seen::Pod(Observed::Built(end)) => return Ok(Reached::Built(end)),
                 Seen::Pod(Observed::Lost(loss)) => {
                     return Ok(Reached::Over(lost(cfg, build, &loss, watch)));
                 }
@@ -319,76 +308,49 @@ impl<C: Cluster> KubeExecutor<C> {
                     tracing::warn!("build {}: the SSH link: {error:#}", build.claimed.job.build_id);
                 },
                 changed = status.changed() => changed?,
-                () = &mut follow, if !followed => followed = true,
+                never = &mut follow => match never {},
                 () = tokio::time::sleep_until(started_by), if !started => {
-                    let last = status.said.clone().unwrap_or_default();
-                    return Ok(Reached::Over(outcome::unstarted_past(timeout, &last, &cfg.namespace)));
+                    return Ok(unstarted(&status.said.clone().unwrap_or_default()));
                 }
             }
-        };
-        if !followed {
-            // A report exists exactly when the agent exited cleanly, and
-            // `tail` then ends by itself at the end of the log.
-            let wait = if end.exit_code == 0 {
-                LOG_END
-            } else {
-                LOG_DRAIN
-            };
-            if tokio::time::timeout(wait, &mut follow).await.is_err() && end.exit_code == 0 {
-                tracing::warn!(
-                    "build {}: the log of {} did not reach its end; reporting what arrived",
-                    build.claimed.job.build_id,
-                    agent.pod
-                );
-            }
         }
-        Ok(Reached::Built(end))
     }
 
     /// Wait for the pod's `stage` container to run, which is when the job
-    /// can be handed in. `Some` is the report of a build that ended here.
+    /// can be handed in. `Some` is the end of a build that ended here.
     async fn until_staged<U: Uploads>(
         &self,
         cfg: &Config,
         build: &Build<'_, U>,
         status: &mut Status,
+        started_by: Instant,
         watch: &StopWatch,
-    ) -> Result<Option<CompleteReport>> {
-        let timeout = cfg.tunables.schedule_timeout;
-        let scheduled_by = Instant::now() + timeout;
-        let mut started_by = None;
+    ) -> Result<Option<Reached>> {
         loop {
-            let awaited = match status.read(&*self.cluster, &build.log).await {
-                Seen::Gone => return Ok(Some(outcome::gone())),
-                Seen::NotYet => Awaited::Node(None),
-                Seen::Pod(Observed::Unscheduled { unschedulable }) => Awaited::Node(unschedulable),
-                Seen::Pod(starting @ (Observed::Starting { .. } | Observed::Unpulled { .. })) => {
-                    Awaited::Stage(starting.line().unwrap_or_default())
-                }
+            let over = match status.read(&*self.cluster, &build.log).await {
+                Seen::Gone => outcome::gone(),
                 Seen::Pod(Observed::Staged) => return Ok(None),
-                Seen::Pod(Observed::Lost(loss)) => {
-                    return Ok(Some(lost(cfg, build, &loss, watch)));
-                }
+                Seen::Pod(Observed::Lost(loss)) => lost(cfg, build, &loss, watch),
                 Seen::Pod(Observed::Building { .. } | Observed::Built(_)) => {
-                    return Ok(Some(report::interrupted(
-                        "the build pod went on before it was handed the job",
-                    )));
+                    report::interrupted("the build pod went on before it was handed the job")
+                }
+                Seen::NotYet
+                | Seen::Pod(Observed::Unscheduled { .. } | Observed::Starting { .. }) => {
+                    tokio::select! {
+                        changed = status.changed() => changed?,
+                        () = tokio::time::sleep_until(started_by) => {
+                            let last = status.said.clone().unwrap_or_default();
+                            return Ok(Some(Reached::Over(outcome::unstarted(
+                                cfg.tunables.schedule_timeout,
+                                &last,
+                                &cfg.namespace,
+                            ))));
+                        }
+                    }
+                    continue;
                 }
             };
-            let (deadline, late) = match awaited {
-                Awaited::Node(message) => (
-                    scheduled_by,
-                    outcome::unscheduled_past(timeout, message.as_deref()),
-                ),
-                Awaited::Stage(where_) => (
-                    *started_by.get_or_insert_with(|| Instant::now() + timeout),
-                    outcome::unstarted_past(timeout, &where_, &cfg.namespace),
-                ),
-            };
-            tokio::select! {
-                changed = status.changed() => changed?,
-                () = tokio::time::sleep_until(deadline) => return Ok(Some(late)),
-            }
+            return Ok(Some(Reached::Over(over)));
         }
     }
 
@@ -400,10 +362,12 @@ impl<C: Cluster> KubeExecutor<C> {
         agent: &Agent<'_, C>,
         build: &Build<'_, U>,
         end: &BuildEnd,
+        lines: &Mutex<Lines>,
         watch: &StopWatch,
     ) -> CompleteReport {
         let Handback {
             report: reported,
+            log_size,
             mut artifacts,
             ..
         } = match agent.manifest().await {
@@ -414,8 +378,20 @@ impl<C: Cluster> KubeExecutor<C> {
                 ));
             }
         };
+        let log = &build.log;
+        if tokio::time::timeout(LOG_END, agent.follow_to(lines, log, log_size))
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                "build {}: the log of {} did not reach its end; reporting what arrived",
+                build.claimed.job.build_id,
+                agent.pod
+            );
+        }
+        flush(lines, log).await;
         if reported.is_none() {
-            self.last_words(agent.pod, end, &build.log).await;
+            self.last_words(agent.pod, end, log).await;
         }
         let done = complete(
             None,
@@ -463,15 +439,6 @@ impl<C: Cluster> KubeExecutor<C> {
         }
         say(log, &text).await;
     }
-}
-
-/// What a pod is waited for before it can be handed its job.
-enum Awaited {
-    /// A node, with the scheduler's message when it has said why there is
-    /// none.
-    Node(Option<String>),
-    /// Its `stage` container, with the pod's own word for where it is.
-    Stage(String),
 }
 
 impl<C: Cluster> Executor for KubeExecutor<C> {
@@ -640,6 +607,18 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Pass on what the log holds back for a line end, ending its line, so that
+/// what the dispatcher says next starts a line of its own.
+async fn flush(lines: &Mutex<Lines>, log: &mpsc::Sender<String>) {
+    let rest = lock(lines).flush();
+    if let Some(mut rest) = rest {
+        if !rest.ends_with('\n') {
+            rest.push('\n');
+        }
+        say(log, &rest).await;
+    }
+}
+
 /// Write to the build log. Losing a line is not worth failing a build over.
 async fn say(log: &mpsc::Sender<String>, text: &str) {
     let _ = log.send(text.to_string()).await;
@@ -677,7 +656,7 @@ fn probe(cfg: &Config) -> Result<Pod> {
     pod::render(&PodInputs {
         cfg,
         job: &job,
-        timeout: Some(PROBE_TIMEOUT),
+        timeout: None,
     })
 }
 
@@ -782,14 +761,14 @@ pub async fn leave<C: Cluster>(cluster: &C) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PodExtras, PullPolicy, Tunables};
+    use crate::config::{PodExtras, Tunables};
 
     fn cfg() -> Config {
         Config {
             namespace: "aurcache-builds".to_string(),
             dispatcher: "0123456789abcdef".to_string(),
             builder_image: "builder:1".to_string(),
-            pull_policy: PullPolicy::Always,
+            pull_policy: "Always".to_string(),
             agent_image: "agent:1".to_string(),
             credential: None,
             extras: PodExtras::default(),

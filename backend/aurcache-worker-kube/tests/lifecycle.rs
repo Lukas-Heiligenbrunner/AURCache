@@ -17,7 +17,7 @@ use aurcache_worker_kube::pod::{BUILD, HOLD, STAGE};
 use std::time::Duration;
 use support::{
     AfterLog, Answer, Call, INPUT, Package, Receive, Rig, Script, Sending, Sink, SshLinkScript,
-    Start, claimed, input, pod_name, report, status,
+    Start, claimed, pod_name, report, status,
 };
 
 const GRACE: Duration = Duration::from_secs(5);
@@ -56,8 +56,6 @@ async fn a_build_that_succeeds_streams_its_packages() {
         [
             format!("{STAGE}: receive --work /work"),
             format!("{HOLD}: tail --work /work --from 0"),
-            // The log ends with a tail that has nothing more to send.
-            format!("{HOLD}: tail --work /work --from 53"),
             format!("{HOLD}: manifest --work /work"),
             format!("{HOLD}: send --work /work --name=hello-1.0-1-x86_64.pkg.tar.zst"),
             format!("{HOLD}: send --work /work --name=hello-docs-1.0-1-any.pkg.tar.zst"),
@@ -246,14 +244,14 @@ async fn a_build_past_its_timeout_is_stopped_and_reported_as_timed_out() {
 async fn the_timeout_does_not_stop_the_hand_back() {
     let rig = Rig::new(Script {
         sends: [Sending::Slow {
-            pause: Duration::from_secs(1000),
+            pause: Duration::from_secs(250),
         }]
         .into(),
         ..Script::default()
     });
     let started = tokio::time::Instant::now();
-    let built = rig.build(&claimed(7, Some(Duration::from_secs(900)))).await;
-    assert_eq!(started.elapsed(), Duration::from_secs(1000));
+    let built = rig.build(&claimed(7, Some(Duration::from_secs(200)))).await;
+    assert_eq!(started.elapsed(), Duration::from_secs(250));
     assert_eq!(built.report.outcome, BuildOutcome::Succeeded);
     assert_eq!(rig.sink.taken().len(), 2);
 }
@@ -290,15 +288,15 @@ async fn a_pod_unschedulable_past_the_timeout_gives_the_build_back() {
     assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
     assert_eq!(
         reason(&built),
-        "no node could take the build within 10m (WORKER_KUBE_SCHEDULE_TIMEOUT): 0/3 nodes are \
-         available: 3 Insufficient memory."
+        "the build pod did not start within 10m (WORKER_KUBE_SCHEDULE_TIMEOUT); when last seen, \
+         no node can take the build pod yet: 0/3 nodes are available: 3 Insufficient memory. \
+         `kubectl -n aurcache-builds get events` says what holds it"
     );
     assert!(rig.cluster.execs().is_empty());
     assert_cleaned_up(&rig, 7);
 }
 
-/// A pod that found a node in time is not held to the schedule timeout
-/// afterwards.
+/// A pod that starts in time builds for as long as it needs.
 #[tokio::test(start_paused = true)]
 async fn a_pod_scheduled_late_but_in_time_builds() {
     let rig = Rig::new(Script {
@@ -325,8 +323,7 @@ async fn a_pod_that_does_not_start_gives_the_build_back() {
         ),
         (
             status::stage_image_missing(),
-            "the stage container cannot start: ErrImagePull: manifest unknown; the node \
-             tries again",
+            "the build pod is starting (ErrImagePull: manifest unknown)",
         ),
     ] {
         let rig = Rig::new(Script {
@@ -343,9 +340,7 @@ async fn a_pod_that_does_not_start_gives_the_build_back() {
             reason(&built),
             format!(
                 "the build pod did not start within 10m (WORKER_KUBE_SCHEDULE_TIMEOUT); when \
-                 last seen, {last}. `kubectl -n aurcache-builds get events` says what holds \
-                 it: an image that cannot be pulled, a volume that cannot be mounted, or a \
-                 network the node cannot give the pod"
+                 last seen, {last}. `kubectl -n aurcache-builds get events` says what holds it"
             )
         );
         assert!(rig.cluster.execs().is_empty());
@@ -353,22 +348,28 @@ async fn a_pod_that_does_not_start_gives_the_build_back() {
     }
 }
 
-/// The wait for a node does not count against the time to start on it.
+/// One deadline covers every wait before the build runs: the time spent
+/// waiting for a node counts against the time to start on it.
 #[tokio::test(start_paused = true)]
-async fn a_pod_gets_as_long_to_start_as_it_had_to_find_a_node() {
+async fn the_start_deadline_counts_from_the_pods_creation() {
     let rig = Rig::new(Script {
         start: Start::Status(Box::new(status::unschedulable("0/3 nodes are available"))),
         ..Script::default()
     });
     let job = claimed(7, None);
+    let started = tokio::time::Instant::now();
     let (built, ()) = tokio::join!(rig.build(&job), async {
-        tokio::time::sleep(Duration::from_secs(590)).await;
+        tokio::time::sleep(Duration::from_secs(400)).await;
         rig.cluster
             .set_status(&pod_name(7), status::starting("PodInitializing"));
-        tokio::time::sleep(Duration::from_secs(590)).await;
-        rig.cluster.set_status(&pod_name(7), status::staged());
     });
-    assert_eq!(built.report.outcome, BuildOutcome::Succeeded);
+    assert_eq!(started.elapsed(), Duration::from_secs(600));
+    assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
+    assert!(
+        reason(&built).contains("(PodInitializing)"),
+        "{}",
+        reason(&built)
+    );
 }
 
 /// The node tries a failed pull again by itself, and a registry that
@@ -386,17 +387,16 @@ async fn an_image_pulled_on_a_later_try_costs_nothing() {
     });
     assert_eq!(built.report.outcome, BuildOutcome::Succeeded);
     assert!(
-        built.log.contains(
-            "[worker] the stage container cannot start: ErrImagePull: manifest unknown; the \
-             node tries again\n"
-        ),
+        built
+            .log
+            .contains("[worker] the build pod is starting (ErrImagePull: manifest unknown)\n"),
         "{}",
         built.log
     );
 }
 
-/// A build container whose image cannot be pulled gets the same allowance
-/// once the job is in.
+/// A build container whose image cannot be pulled is held to the same
+/// deadline once the job is in.
 #[tokio::test(start_paused = true)]
 async fn a_builder_image_that_cannot_be_pulled_is_an_interruption() {
     let rig = Rig::new(Script {
@@ -527,8 +527,6 @@ async fn a_log_stream_lost_twice_is_resumed_without_a_repeated_or_missing_byte()
             format!("{HOLD}: tail --work /work --from 0"),
             format!("{HOLD}: tail --work /work --from 6"),
             format!("{HOLD}: tail --work /work --from 26"),
-            // The one that finds nothing more to send.
-            format!("{HOLD}: tail --work /work --from 61"),
         ]
     );
     let forwarded: String = built
@@ -540,14 +538,17 @@ async fn a_log_stream_lost_twice_is_resumed_without_a_repeated_or_missing_byte()
     assert_eq!(forwarded, log);
 }
 
-/// A `tail` cut short can still end in success. The log is followed on from
-/// where it stopped, and only a `tail` with nothing more to send ends it.
+/// A `tail` cut short can still end in success, with nothing at all sent.
+/// After the build, the log is followed until it has the length that the
+/// manifest gives.
 #[tokio::test(start_paused = true)]
-async fn a_log_stream_cut_short_in_success_is_followed_to_its_end() {
+async fn the_log_is_read_to_the_manifests_length_whatever_a_tail_says() {
     let log = "first line\nsecond line";
     let rig = Rig::new(Script {
         log: log.as_bytes().to_vec(),
-        tail_cuts: [11].into(),
+        // The build is over before the log was read at all.
+        after_receive: Box::new(status::built(0, "Completed")),
+        tail_cuts: [0, 11].into(),
         ..Script::default()
     });
     let built = rig.build(&claimed(7, None)).await;
@@ -562,8 +563,8 @@ async fn a_log_stream_cut_short_in_success_is_followed_to_its_end() {
         tails,
         [
             format!("{HOLD}: tail --work /work --from 0"),
+            format!("{HOLD}: tail --work /work --from 0"),
             format!("{HOLD}: tail --work /work --from 11"),
-            format!("{HOLD}: tail --work /work --from 22"),
         ]
     );
     let forwarded: Vec<&str> = built
@@ -572,6 +573,27 @@ async fn a_log_stream_cut_short_in_success_is_followed_to_its_end() {
         .filter(|line| !line.starts_with("[worker]"))
         .collect();
     assert_eq!(forwarded, ["first line", "second line"]);
+}
+
+/// A send that passes nothing for five minutes is given up, and so is the
+/// one that tries again.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_send_is_given_up() {
+    let rig = Rig::new(Script {
+        packages: vec![Package::of("hello-1.0-1-x86_64.pkg.tar.zst", b"hello")],
+        sends: [Sending::Hangs, Sending::Hangs].into(),
+        ..Script::default()
+    });
+    let started = tokio::time::Instant::now();
+    let built = rig.build(&claimed(7, None)).await;
+    assert_eq!(started.elapsed(), Duration::from_secs(600));
+    assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
+    assert!(
+        reason(&built).contains("passed for 5 minutes"),
+        "{}",
+        reason(&built)
+    );
+    assert_cleaned_up(&rig, 7);
 }
 
 /// A stream that breaks under an upload, or ends short with a success,
@@ -645,7 +667,7 @@ async fn a_package_the_server_refuses_is_not_retried() {
 #[tokio::test(start_paused = true)]
 async fn a_name_in_the_manifest_that_is_not_a_package_is_left_out() {
     let manifest = r#"{"interface":1,"report":{"interface":1,"ended":{"how":"exited","code":0}},
-        "artifacts":[{"name":"../x","size":1}]}"#;
+        "log_size":0,"artifacts":[{"name":"../x","size":1}]}"#;
     let rig = Rig::new(Script {
         manifest: Some(manifest.to_string()),
         ..Script::default()
@@ -661,7 +683,7 @@ async fn a_name_in_the_manifest_that_is_not_a_package_is_left_out() {
 #[tokio::test(start_paused = true)]
 async fn a_manifest_from_another_interface_is_refused() {
     let rig = Rig::new(Script {
-        manifest: Some(r#"{"interface":2,"report":null,"artifacts":[]}"#.to_string()),
+        manifest: Some(r#"{"interface":2,"report":null,"log_size":0,"artifacts":[]}"#.to_string()),
         ..Script::default()
     });
     let built = rig.build(&claimed(7, None)).await;
@@ -706,40 +728,6 @@ async fn a_failed_hand_in_is_an_interruption_and_is_not_retried() {
         rig.cluster.execs(),
         [format!("{STAGE}: receive --work /work")]
     );
-    assert_cleaned_up(&rig, 7);
-}
-
-/// The pod goes whatever becomes of the task that built in it.
-#[tokio::test(start_paused = true)]
-async fn a_panic_while_building_still_deletes_the_pod() {
-    use aurcache_worker_kube::executor::Build;
-    use aurcache_worker_kube::transfer::Uploads;
-    use futures::FutureExt;
-
-    struct Panics;
-    impl Uploads for Panics {
-        async fn upload<R>(&self, _: i32, _: &str, _: R, _: u64) -> anyhow::Result<()>
-        where
-            R: tokio::io::AsyncRead + Send + Unpin + 'static,
-        {
-            panic!("the upload panicked");
-        }
-    }
-
-    let rig = Rig::new(Script::default());
-    let job = claimed(7, None);
-    let (log, mut lines) = tokio::sync::mpsc::channel(16);
-    let build = Build {
-        claimed: &job,
-        input: input(),
-        log,
-        uploads: &Panics,
-        ssh: None,
-    };
-    let drain = async { while lines.recv().await.is_some() {} };
-    let building = std::panic::AssertUnwindSafe(rig.executor.build(build)).catch_unwind();
-    let (ended, ()) = tokio::join!(building, drain);
-    assert!(ended.is_err(), "the panic should reach the runner");
     assert_cleaned_up(&rig, 7);
 }
 
