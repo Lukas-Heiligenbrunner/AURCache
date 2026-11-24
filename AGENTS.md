@@ -146,13 +146,14 @@ they cover, rather than running all of them as a matter of course:
 
 CI runs the lint and unit tests for both workspaces, `test-frontend.sh`,
 `test-kernel.sh`, `test-sandbox.sh`, `test-signed-repo.sh` and
-`test-build-agent.sh` on every push; `test-e2e.sh` runs nightly instead, and
-only when something landed that day. The nightly cannot cover a pool on a
-block device or zvol, or an image on ZFS; the runner has neither. Add the
-`run-e2e` label to a pull request to run the e2e suite there on demand, and
-`preview-image` to publish its server image as `aurcache-server:pr-<number>`
-on every push (a pull request from a branch here only: a fork's cannot push).
-Neither hybrid suite runs in CI.
+`test-build-agent.sh` on every push; `test-e2e.sh` and the kind suite run
+nightly instead, and only when something landed that day. The nightly cannot
+cover a pool on a block device or zvol, or an image on ZFS; the runner has
+neither. Add the `run-e2e` label to a pull request to run the e2e suite there
+on demand, `run-e2e-kube` for the Kubernetes one, and `preview-image` to
+publish its server image as `aurcache-server:pr-<number>` on every push (a
+pull request from a branch here only: a fork's cannot push). Neither hybrid
+suite runs in CI.
 
 Unit and integration tests are cheap (backend ~8s, frontend <1s) and should be
 the reflex. They render components directly, though, so they cannot see whether
