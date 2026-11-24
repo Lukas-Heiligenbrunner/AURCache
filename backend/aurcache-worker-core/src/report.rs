@@ -107,12 +107,7 @@ fn timed_out(elapsed: Duration, limit: Timeout) -> CompleteReport {
         TimeoutSource::Worker => "this worker's build timeout",
         TimeoutSource::Server => "the package's job timeout",
     };
-    // A whole number of minutes or more reads with its unit; anything else
-    // is a bare count of seconds, which needs one.
-    let mut limit = aurcache_common::units::format_duration(limit.limit.as_secs());
-    if limit.bytes().all(|b| b.is_ascii_digit()) {
-        limit.push('s');
-    }
+    let limit = aurcache_common::units::describe_duration(limit.limit.as_secs());
     failure(
         Some(124),
         format!(

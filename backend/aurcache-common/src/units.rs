@@ -147,6 +147,16 @@ pub fn format_duration(seconds: u64) -> String {
         )
 }
 
+/// [`format_duration`] for prose: a bare count of seconds gets an `s`.
+#[must_use]
+pub fn describe_duration(seconds: u64) -> String {
+    let mut shown = format_duration(seconds);
+    if shown.bytes().all(|byte| byte.is_ascii_digit()) {
+        shown.push('s');
+    }
+    shown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
