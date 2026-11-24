@@ -1,10 +1,11 @@
 name: Publish Arch-based images
 
 # The Arch-based images: the worker, the hybrid compatibility image, and the
-# builder image the docker worker spawns per build — plus the Debian-based demo
-# worker, which the demo compose file pulls from ghcr.io.
+# builder image the Docker worker spawns per build — plus two Debian-based
+# workers: the demo worker, which the demo compose file pulls from ghcr.io,
+# and the Kubernetes worker, which its manifests pull from there.
 #
-# All four must be published for every release tag: a release whose server and
+# All five must be published for every release tag: a release whose server and
 # worker images come from different commits can disagree about the worker
 # protocol.
 #
@@ -105,4 +106,13 @@ jobs:
         run: >
           ./scripts/build-images.sh --push --cache gha --images demo-worker
           --platforms linux/amd64
+          --tag "$TAG" $LATEST "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+      -
+        # The Kubernetes worker's dispatcher, which is also the image that its
+        # build pods take the build agent from, so it is built for every
+        # architecture that builds run on. Debian, cross-compiled on the
+        # runner like the server, so it needs no cache to be quick.
+        name: Build the Kubernetes worker image
+        run: >
+          ./scripts/build-images.sh --push --images kube-worker
           --tag "$TAG" $LATEST "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
