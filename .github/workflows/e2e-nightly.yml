@@ -5,8 +5,9 @@ name: E2E (nightly)
 # flaky in ways no diff can fix, so it runs once a night instead of on every
 # push -- and only when something actually landed since the last slot.
 #
-# To run it on a pull request on demand, add the `run-e2e` label; the job
-# removes it when done, so re-adding it re-runs the suite.
+# To run it on a pull request on demand, add the `run-e2e` label; a job of its
+# own takes it off once the run is over, pass or fail, so re-adding it re-runs
+# the suite.
 on:
   schedule:
     - cron: '17 3 * * *'
@@ -16,8 +17,6 @@ on:
 
 permissions:
   contents: read
-  # Removing the trigger label once the run finishes.
-  issues: write
 
 jobs:
   e2eTest:
@@ -31,6 +30,9 @@ jobs:
           # The e2e suite builds the images, which read the PKGBUILDs from the
           # AUR submodules under packaging/.
           submodules: recursive
+          # The suite builds and runs code from the tree under test; nothing
+          # in it needs to push.
+          persist-credentials: false
 
       - name: Check for new commits
         id: changed
@@ -58,15 +60,21 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         run: ./scripts/test-e2e.sh hello
 
-      # The label means "e2e requested". Taking it back off once the run is over
-      # -- pass or fail -- restores that meaning and lets a re-add trigger a
-      # fresh run. Best-effort: fork PRs get a read-only token, so removal
-      # fails there and the label just stays until someone clears it.
+  # Take the label off after the run, pass or fail, so that adding it again
+  # re-runs the suite. A job of its own, so the token that can edit the PR
+  # never shares a job with the tree's code. Fork PRs get a read-only token,
+  # so there the label stays.
+  removeLabel:
+    needs: e2eTest
+    if: always() && github.event_name == 'pull_request' && github.event.label.name == 'run-e2e'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
       - name: Remove the trigger label
-        if: always() && github.event_name == 'pull_request'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh pr edit ${{ github.event.pull_request.number }}
-          --remove-label run-e2e
+          PR: ${{ github.event.pull_request.number }}
+        # The REST call needs only the pull-requests permission above.
+        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/run-e2e"
