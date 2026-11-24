@@ -112,8 +112,8 @@ jobs:
           cargo check -p aurcache-worker-docker
           cargo check -p aurcache-cli
           # The build agent, which packaging/common.sh builds alone beside the
-          # Docker worker's package, and docker/build-kube-worker.sh beside
-          # the Kubernetes worker (docker/kube-worker.Dockerfile).
+          # Docker worker's package, and docker/build-rust.sh beside the
+          # Kubernetes worker (docker/kube-worker.Dockerfile).
           cargo check -p aurcache-build-agent
           cargo check -p aurcache-worker-kube
           # docker/build-rust.sh (docker/server.Dockerfile)

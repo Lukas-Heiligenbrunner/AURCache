@@ -3,11 +3,12 @@
 # The Kubernetes worker (`aurcache-worker-kube`): the dispatcher, which builds
 # each job in a pod of its own, and the build agent those pods run.
 #
-# One image serves both. Its default entrypoint is the dispatcher; the build
-# pods start it again with `/usr/local/bin/aurcache-build-agent` as their
-# command: the `stage` init container copies the agent into the pod, the
-# `hold` container keeps the pod up while packages are read out. So it exists
-# for every architecture builds run on, and runs on every node that builds.
+# One image serves both. Its default entrypoint is the dispatcher. In a build
+# pod, the `stage` init container runs `/usr/local/bin/aurcache-build-agent`
+# from it to copy the agent into the pod, and the `hold` container runs
+# `sleep infinity` from it, keeping the pod up while packages are read out
+# through its agent. So it exists for every architecture builds run on, and
+# runs on every node that builds.
 #
 # What the binaries report as their version (see aurcache-common's build
 # script): the commit, except on release builds, which name the tag instead.
@@ -41,11 +42,11 @@ WORKDIR /app/backend
 
 # Which architecture to cross-compile for: buildx sets `TARGETPLATFORM` per
 # target in a multi-platform build. common.sh is the PKGBUILDs' own helpers,
-# which build-kube-worker.sh takes the target triples from.
+# which build-rust.sh takes the target triples from.
 ARG TARGETPLATFORM
-COPY docker/build-kube-worker.sh packaging/common.sh /root/
+COPY docker/build-rust.sh packaging/common.sh /root/
 RUN --mount=type=cache,target=/opt/cargo-cache,id=cargo-downloads-root \
-    bash /root/build-kube-worker.sh "$TARGETPLATFORM"
+    bash /root/build-rust.sh "$TARGETPLATFORM" kube-worker
 
 # No `--platform` here: buildx already builds this stage for the target.
 FROM debian:bookworm-slim

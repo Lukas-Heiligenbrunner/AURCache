@@ -23,7 +23,7 @@
 # the build host, once for both; only their runtime stages are
 # per-architecture, so an emulated build spends its time on `pacman -U` rather
 # than on cargo. The server image is Debian and cross-compiles through
-# build-rust.sh, and the kube-worker image through build-kube-worker.sh. The
+# build-rust.sh, and so does the kube-worker image. The
 # demo-worker image is Debian too but builds natively per platform, which
 # under emulation is slow rather than wrong (see docker/demo-worker.Dockerfile).
 #
