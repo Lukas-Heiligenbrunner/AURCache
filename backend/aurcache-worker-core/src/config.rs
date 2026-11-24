@@ -199,7 +199,8 @@ pub fn parse_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Detect the host architecture via `uname -m`, defaulting to `x86_64`.
+/// Detect the host architecture via `uname -m`, in pacman's naming,
+/// defaulting to `x86_64`.
 #[must_use]
 pub fn detect_arch() -> String {
     std::process::Command::new("uname")
@@ -210,7 +211,17 @@ pub fn detect_arch() -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "x86_64".to_string())
+        .map_or_else(|| "x86_64".to_string(), |s| pacman_arch(&s).to_string())
+}
+
+/// Pacman's name for a machine as `uname -m` prints it. Only 32-bit ARM
+/// differs among the architectures AURCache builds for: the kernel says
+/// `armv7l`, or `armv8l` for a 32-bit process on a 64-bit kernel.
+fn pacman_arch(machine: &str) -> &str {
+    match machine {
+        "armv7l" | "armv8l" => "armv7h",
+        other => other,
+    }
 }
 
 fn detect_hostname() -> String {
@@ -329,5 +340,13 @@ mod tests {
         assert_eq!(parse_list("aarch64, armv7h"), vec!["aarch64", "armv7h"]);
         assert_eq!(parse_list("a b,c  d"), vec!["a", "b", "c", "d"]);
         assert!(parse_list("  ,  ").is_empty());
+    }
+
+    #[test]
+    fn names_machines_as_pacman_does() {
+        assert_eq!(pacman_arch("armv7l"), "armv7h");
+        assert_eq!(pacman_arch("armv8l"), "armv7h");
+        assert_eq!(pacman_arch("aarch64"), "aarch64");
+        assert_eq!(pacman_arch("x86_64"), "x86_64");
     }
 }
