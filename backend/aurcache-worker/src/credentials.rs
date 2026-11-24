@@ -25,7 +25,7 @@
 
 use anyhow::{Context, Result};
 use aurcache_common::fs::write_public;
-use aurcache_common::shell::quote_argument;
+use aurcache_common::shell::{quote_argument, ssh_config_word};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -200,10 +200,13 @@ pub fn git_ssh_command(known_hosts: Option<&Path>) -> String {
     let mut cmd = String::from("ssh");
     match known_hosts {
         Some(path) => {
-            // Quoted for the shell git runs this through: an unquoted path
-            // with a space would split into two ssh arguments.
-            cmd.push_str(" -o UserKnownHostsFile=");
-            cmd.push_str(&quote_argument(&path.display().to_string()));
+            // Quoted for ssh, then for the shell that git runs this through.
+            let file = format!(
+                "UserKnownHostsFile={}",
+                ssh_config_word(&path.to_string_lossy())
+            );
+            cmd.push_str(" -o ");
+            cmd.push_str(&quote_argument(&file));
             for option in PINNED {
                 cmd.push_str(" -o ");
                 cmd.push_str(option);
@@ -918,8 +921,9 @@ mod tests {
         }
     }
 
-    /// The known-hosts path travels inside `GIT_SSH_COMMAND`, which git
-    /// splits on spaces: it must arrive there as one shell word.
+    /// The known-hosts path travels inside `GIT_SSH_COMMAND`, which git runs
+    /// through a shell: it must arrive at ssh as one argument, and ssh must
+    /// read one file out of it.
     #[test]
     fn a_spaced_known_hosts_path_stays_one_ssh_argument() {
         let out = std::process::Command::new("sh")
@@ -931,11 +935,10 @@ mod tests {
             .output()
             .expect("sh should run");
         assert!(out.status.success());
-        // The path one word, intact: the shell consumed the quotes while
-        // splitting, which is exactly what protects the spaces.
+        // One shell word, the shell's quotes consumed; ssh's are left for it.
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            "<ssh><-o><UserKnownHostsFile=/my dir/known hosts>\
+            "<ssh><-o><UserKnownHostsFile=\"/my dir/known hosts\">\
              <-o><GlobalKnownHostsFile=/dev/null><-o><KnownHostsCommand=none>\
              <-o><VerifyHostKeyDNS=no><-o><StrictHostKeyChecking=yes>"
         );
