@@ -4,8 +4,8 @@
 //! same patched `tar.gz`, and a build always ends as `*.pkg.tar.*` files in a
 //! directory, however it was produced.
 
-use crate::beneath;
 use anyhow::{Context, Result};
+use aurcache_common::beneath;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};

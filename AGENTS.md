@@ -213,8 +213,9 @@ defect this frontend has had was of that kind.
   all speak, plus small helpers that would otherwise be duplicated or force a heavy dependency. Everything
   in it is dependency-free or behind a feature — `db` (sea-orm derives) and `fs` (filesystem helpers) are
   both on by default, and wasm consumers take `default-features = false` and still get the types.
-  `openapi` (utoipa schemas, for `/docs`) and `digest` (SHA-256 hex) are off by default and named by the
-  crates that need them, so the browser bundle carries neither. CI's
+  `openapi` (utoipa schemas, for `/docs`), `digest` (SHA-256 hex) and `beneath` (opening what a build
+  left without following links) are off by default and named by the crates that need them, so the
+  browser bundle carries none of them. CI's
   "Check driver-free types" job (`cargo check -p aurcache-common --no-default-features`) is what keeps
   that true; a workspace build always turns the features on, so nothing else would catch a regression.
   It was called `aurcache-types` until it grew helpers as well as types.
