@@ -468,7 +468,8 @@ impl WorkerClient {
                 "source",
             )
             .await?;
-        Ok(resp.bytes().await.context("reading source")?.to_vec())
+        // The body's own allocation, not a copy of it: a source can be large.
+        Ok(resp.bytes().await.context("reading source")?.into())
     }
 
     /// Append a chunk of build log output.

@@ -1,0 +1,51 @@
+[package]
+name = "aurcache-worker-kube"
+version = "0.1.0"
+edition = "2024"
+
+# The Kubernetes worker: a dispatcher that builds each job in a pod of its own,
+# at Pod Security `baseline`, and streams the packages from the pod to the
+# server without storing them.
+
+[[bin]]
+name = "aurcache-worker-kube"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# TLS through rustls on aws-lc-rs, the provider reqwest already brings.
+kube = { version = "5.1.0", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs", "ws"] }
+# kube's client takes rustls' process-wide provider, and the workspace's
+# rustls has both ring and aws-lc-rs compiled in, so neither is the default
+# by itself: the dispatcher installs aws-lc-rs's before it connects.
+rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std"] }
+# The oldest API version k8s-openapi offers, so the types cover every cluster
+# from it on.
+k8s-openapi = { version = "0.29.0", features = ["v1_33"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
+futures = "0.3.34"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+aurcache-common = { path = "../aurcache-common" }
+aurcache-worker-core = { path = "../aurcache-worker-core" }
+aurcache-worker-container = { path = "../aurcache-worker-container" }
+aurcache-build-agent = { path = "../aurcache-build-agent" }
+
+[dev-dependencies]
+# The real worker listener, started in-process by the streaming test.
+aurcache-activitylog = { path = "../aurcache-activitylog" }
+aurcache-api = { path = "../aurcache-api" }
+aurcache-db = { path = "../aurcache-db", features = ["testing"] }
+aurcache-ca = { path = "../aurcache-ca" }
+aurcache-utils = { path = "../aurcache-utils" }
+sea-orm = { workspace = true }
+zstd = "0.14.3"
+tar = { workspace = true }
+tempfile = { workspace = true }
+# Paused time.
+tokio = { workspace = true, features = ["full", "test-util"] }

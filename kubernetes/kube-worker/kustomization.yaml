@@ -1,0 +1,43 @@
+# The Kubernetes worker: apply after kubernetes/server/. It puts the dispatcher
+# in `aurcache` and its build pods in `aurcache-builds`. See
+# docs/docs/workers/kubernetes.md.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: aurcache
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - networkpolicy.yaml
+  - worker.yaml
+  # - resourcequota.yaml
+
+# The manifest names `git`, built from master and pulled at every start. Pin
+# it by digest, or later by release (`newTag`, the server's version):
+#
+# images:
+#   - name: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube
+#     digest: sha256:<digest>
+
+# Build pods take the agent from the dispatcher's image: this copies it into
+# WORKER_KUBE_AGENT_IMAGE. An overlay that sets the image sets that too.
+replacements:
+  - source:
+      kind: Deployment
+      name: aurcache-kube-worker
+      fieldPath: spec.template.spec.containers.[name=worker].image
+    targets:
+      - select:
+          kind: Deployment
+          name: aurcache-kube-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].env.[name=WORKER_KUBE_AGENT_IMAGE].value
+
+# Optional automatic approval, with the server's `aurcache-enrollment` Secret:
+#
+#     kubectl -n aurcache create secret generic aurcache-enrollment \
+#       --from-literal=token="$(openssl rand -hex 32)"
