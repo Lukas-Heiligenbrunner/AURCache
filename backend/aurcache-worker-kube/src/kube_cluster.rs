@@ -11,12 +11,17 @@
 //! to the caller's pace and nothing is buffered whole. Its stderr goes through
 //! a pipe of its own, drained by a task of its own, because a full stderr pipe
 //! would stop stdout and the exit status with it.
+//!
+//! kube's pipes stay open when the stream breaks, so each is forwarded into
+//! one that ends once the exit status is in, or the stream ended without one.
+//! A reader learns which from [`Exec::ended`], never from the end of the
+//! pipe.
 
 use crate::cluster::{Cluster, CreateError, Exec, ExecEnd, PROMPT, Stdin, Sweep};
 use crate::pod;
 use anyhow::{Context, Result, ensure};
-use futures::StreamExt;
 use futures::future::BoxFuture;
+use futures::{FutureExt, StreamExt};
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Status as ExitStatus;
 use kube::api::{
@@ -27,15 +32,10 @@ use kube::runtime::WatchStreamExt;
 use kube::runtime::reflector::store::Writer;
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::watcher::{self, Event};
-use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll, ready};
 use std::time::Duration;
-use tokio::io::{
-    AsyncRead, AsyncReadExt, AsyncWriteExt, DuplexStream, ReadBuf, ReadHalf, SimplexStream,
-    WriteHalf,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, SimplexStream, WriteHalf};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -204,15 +204,15 @@ impl Cluster for KubeCluster {
             .await
             .with_context(|| format!("running {argv:?} in {pod}/{container}"))?;
         let streams = Streams::take(&mut process, stdin)?;
-        let (pump, over) = watch::channel(Pump::Running);
-        let status = tokio::spawn(settle(streams.status, pump));
-        let stderr = tokio::spawn(tail(Output::new(streams.stderr, over.clone())));
+        let (settled, is_settled) = watch::channel(false);
+        let status = tokio::spawn(settle(streams.status, settled));
+        let stderr = tokio::spawn(tail(forward(streams.stderr, is_settled.clone())));
         let stdin = streams.stdin.map(|sink| {
-            Box::pin(feed(sink, over.clone())) as Pin<Box<dyn tokio::io::AsyncWrite + Send>>
+            Box::pin(feed(sink, is_settled.clone())) as Pin<Box<dyn tokio::io::AsyncWrite + Send>>
         });
         Ok(Exec {
             stdin,
-            stdout: Box::pin(Output::new(streams.stdout, over)),
+            stdout: Box::pin(forward(streams.stdout, is_settled)),
             ended: Box::pin(ended(process, status, stderr)),
         })
     }
@@ -300,123 +300,52 @@ impl Streams {
     }
 }
 
-/// Where the task that moves an exec's streams is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pump {
-    Running,
-    /// The process's exit status arrived. What the stream carried is in the
-    /// pipes, which may be short of what it wrote: see [`ExecEnd::Succeeded`].
-    Finished,
-    /// The stream ended without an exit status.
-    Broken,
-}
-
-/// Wait for the exit status, and say on `pump` that the streams are over.
+/// Wait for the exit status, and say on `settled` that the streams are over.
 async fn settle(
     status: BoxFuture<'static, Option<ExitStatus>>,
-    pump: watch::Sender<Pump>,
+    settled: watch::Sender<bool>,
 ) -> Option<ExitStatus> {
     let status = status.await;
-    let over = if status.is_some() {
-        Pump::Finished
-    } else {
-        Pump::Broken
-    };
-    pump.send_replace(over);
+    settled.send_replace(true);
     status
 }
 
-/// Resolves once `pump` is no longer [`Pump::Running`].
-async fn over(mut pump: watch::Receiver<Pump>) -> Pump {
-    match pump.wait_for(|state| *state != Pump::Running).await {
-        Ok(state) => *state,
-        Err(_) => Pump::Broken,
-    }
+/// Resolves once `settled` says the streams are over.
+async fn over(mut settled: watch::Receiver<bool>) {
+    let _ = settled.wait_for(|settled| *settled).await;
 }
 
-/// One of an exec's output pipes, ending where the process's output does.
-///
-/// kube's pipes do not say where that is. One stays open when the stream
-/// breaks, and one is closed when the stream ends, before kube lets go of
-/// the status, whether one came or not. So a read that finds nothing asks
-/// the pump: this ends once the exit status is in, and fails for a stream
-/// that ended without one. A reader never waits on a pipe that nothing
-/// writes to, and never takes a broken stream for one read to its end; a
-/// stream cut short before a success status is not told apart (see
-/// [`ExecEnd::Succeeded`]).
-struct Output {
-    pipe: ReadHalf<SimplexStream>,
-    pump: Settling,
-}
-
-enum Settling {
-    Waiting(BoxFuture<'static, Pump>),
-    Settled(Pump),
-}
-
-impl Output {
-    fn new(pipe: ReadHalf<SimplexStream>, pump: watch::Receiver<Pump>) -> Self {
-        Self {
-            pipe,
-            pump: Settling::Waiting(Box::pin(over(pump))),
-        }
-    }
-}
-
-impl AsyncRead for Output {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if buf.remaining() == 0 {
-            return Poll::Ready(Ok(()));
-        }
-        if let Some(read) = gave(&mut this.pipe, cx, buf) {
-            return Poll::Ready(read);
-        }
-        let state = match &mut this.pump {
-            Settling::Settled(state) => *state,
-            Settling::Waiting(over) => {
-                let state = ready!(over.as_mut().poll(cx));
-                this.pump = Settling::Settled(state);
-                // What was written before the pump settled is in the pipe
-                // now, even if the read above came too early to see it.
-                if let Some(read) = gave(&mut this.pipe, cx, buf) {
-                    return Poll::Ready(read);
-                }
-                state
+/// A pipe that carries what `pipe` does, and ends where `pipe` does or once
+/// the streams are over and `pipe` has nothing more at hand. kube writes
+/// each frame into its pipe before it reads the next, so everything sent
+/// before the exit status is in `pipe` by the time that status is.
+fn forward(mut pipe: ReadHalf<SimplexStream>, settled: watch::Receiver<bool>) -> DuplexStream {
+    let (reader, mut out) = tokio::io::duplex(PIPE);
+    tokio::spawn(async move {
+        let mut chunk = vec![0; PIPE];
+        let mut over = Box::pin(over(settled));
+        loop {
+            let read = tokio::select! {
+                biased;
+                read = pipe.read(&mut chunk) => read,
+                () = &mut over => break,
+            };
+            match read {
+                Ok(read @ 1..) if out.write_all(&chunk[..read]).await.is_ok() => {}
+                _ => return,
             }
-        };
-        Poll::Ready(match state {
-            Pump::Broken => Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "the exec stream broke before the process ended",
-            )),
-            Pump::Running | Pump::Finished => Ok(()),
-        })
-    }
-}
-
-/// What a read of `pipe` into `buf` gave: bytes, or an error. `None` when it
-/// gave nothing, the pipe being empty for now or at its end, which only the
-/// pump tells apart from the end of the process's output.
-fn gave(
-    pipe: &mut ReadHalf<SimplexStream>,
-    cx: &mut TaskContext<'_>,
-    buf: &mut ReadBuf<'_>,
-) -> Option<io::Result<()>> {
-    let before = buf.filled().len();
-    match Pin::new(pipe).poll_read(cx, buf) {
-        Poll::Ready(Ok(())) if buf.filled().len() == before => None,
-        Poll::Ready(read) => Some(read),
-        Poll::Pending => None,
-    }
+        }
+        while let Some(Ok(read @ 1..)) = pipe.read(&mut chunk).now_or_never() {
+            if out.write_all(&chunk[..read]).await.is_err() {
+                return;
+            }
+        }
+    });
+    reader
 }
 
 /// The last [`STDERR_TAIL`] bytes of `stderr`, read to its end.
-async fn tail(mut stderr: Output) -> String {
+async fn tail(mut stderr: DuplexStream) -> String {
     let mut kept = Vec::new();
     let mut chunk = vec![0; 8 * 1024];
     while let Ok(read @ 1..) = stderr.read(&mut chunk).await {
@@ -432,7 +361,7 @@ async fn tail(mut stderr: Output) -> String {
 /// kube's, which only ends on a shutdown. The copy stops when the process
 /// does, so a caller writing to a process that is gone gets an error instead
 /// of waiting.
-fn feed(mut sink: WriteHalf<SimplexStream>, pump: watch::Receiver<Pump>) -> DuplexStream {
+fn feed(mut sink: WriteHalf<SimplexStream>, settled: watch::Receiver<bool>) -> DuplexStream {
     let (caller, mut source) = tokio::io::duplex(PIPE);
     tokio::spawn(async move {
         let copy = async {
@@ -442,7 +371,7 @@ fn feed(mut sink: WriteHalf<SimplexStream>, pump: watch::Receiver<Pump>) -> Dupl
         };
         tokio::select! {
             () = copy => {}
-            _ = over(pump) => {}
+            () = over(settled) => {}
         }
     });
     caller
@@ -568,77 +497,34 @@ mod tests {
 
     struct Piped {
         writer: WriteHalf<SimplexStream>,
-        output: Output,
-        pump: watch::Sender<Pump>,
+        output: DuplexStream,
+        settled: watch::Sender<bool>,
     }
 
     fn piped() -> Piped {
         let (reader, writer) = tokio::io::simplex(64);
-        let (pump, over) = watch::channel(Pump::Running);
+        let (settled, is_settled) = watch::channel(false);
         Piped {
             writer,
-            output: Output::new(reader, over),
-            pump,
+            output: forward(reader, is_settled),
+            settled,
         }
     }
 
+    /// kube's pipe stays open when the stream breaks: what it held is
+    /// passed on, and the output ends once the streams are over.
     #[tokio::test]
-    async fn output_ends_after_its_last_byte_once_the_status_is_in() {
+    async fn output_ends_after_its_last_byte_once_the_streams_are_over() {
         let mut pipe = piped();
         pipe.writer.write_all(b"last").await.unwrap();
-        pipe.pump.send_replace(Pump::Finished);
+        let mut byte = [0; 4];
+        pipe.output.read_exact(&mut byte).await.unwrap();
+        pipe.writer.write_all(b" one").await.unwrap();
+        tokio::task::yield_now().await;
+        pipe.settled.send_replace(true);
         let mut read = Vec::new();
         pipe.output.read_to_end(&mut read).await.unwrap();
-        assert_eq!(read, b"last");
-    }
-
-    #[tokio::test]
-    async fn output_fails_once_the_stream_broke() {
-        let mut pipe = piped();
-        pipe.writer.write_all(b"part").await.unwrap();
-        pipe.pump.send_replace(Pump::Broken);
-        let mut read = Vec::new();
-        let err = pipe.output.read_to_end(&mut read).await.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
-        assert_eq!(read, b"part");
-    }
-
-    /// The order kube ends a stream that closed without a status in: the
-    /// pipe is shut down first, and the status let go of after. The pipe's
-    /// end is not taken for the process's: the read waits for the pump, and
-    /// fails.
-    #[tokio::test]
-    async fn output_shut_down_before_a_lost_status_fails() {
-        let Piped {
-            mut writer,
-            mut output,
-            pump,
-        } = piped();
-        writer.write_all(b"part").await.unwrap();
-        writer.shutdown().await.unwrap();
-        let reading = tokio::spawn(async move {
-            let mut read = Vec::new();
-            let err = output.read_to_end(&mut read).await.unwrap_err();
-            assert_eq!(read, b"part");
-            err.kind()
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            !reading.is_finished(),
-            "the read ended at the pipe's end, before the status was known"
-        );
-        pump.send_replace(Pump::Broken);
-        assert_eq!(reading.await.unwrap(), io::ErrorKind::UnexpectedEof);
-    }
-
-    /// An empty buffer is no read at all, not the end.
-    #[tokio::test]
-    async fn an_empty_read_is_not_the_end() {
-        let mut pipe = piped();
-        pipe.writer.write_all(b"x").await.unwrap();
-        assert_eq!(pipe.output.read(&mut []).await.unwrap(), 0);
-        let mut byte = [0; 1];
-        assert_eq!(pipe.output.read(&mut byte).await.unwrap(), 1);
+        assert_eq!(read, b" one");
     }
 
     #[tokio::test]
@@ -659,7 +545,7 @@ mod tests {
         let head = vec![b'a'; 3 * STDERR_TAIL];
         pipe.writer.write_all(&head).await.unwrap();
         pipe.writer.write_all(b"the end\n").await.unwrap();
-        pipe.pump.send_replace(Pump::Finished);
+        pipe.writer.shutdown().await.unwrap();
         let kept = reading.await.unwrap();
         assert!(kept.ends_with("the end"));
         assert!(kept.len() <= STDERR_TAIL);
@@ -668,8 +554,8 @@ mod tests {
     #[tokio::test]
     async fn fed_stdin_ends_when_dropped() {
         let (mut reader, writer) = tokio::io::simplex(64);
-        let (_pump, over) = watch::channel(Pump::Running);
-        let mut caller = feed(writer, over);
+        let (_settled, is_settled) = watch::channel(false);
+        let mut caller = feed(writer, is_settled);
         caller.write_all(b"job").await.unwrap();
         drop(caller);
         let mut read = Vec::new();
@@ -680,9 +566,9 @@ mod tests {
     #[tokio::test]
     async fn fed_stdin_fails_once_the_process_is_gone() {
         let (_reader, writer) = tokio::io::simplex(64);
-        let (pump, over) = watch::channel(Pump::Running);
-        let mut caller = feed(writer, over);
-        pump.send_replace(Pump::Finished);
+        let (settled, is_settled) = watch::channel(false);
+        let mut caller = feed(writer, is_settled);
+        settled.send_replace(true);
         let big = vec![0; 4 * PIPE];
         let written = tokio::time::timeout(Duration::from_secs(5), caller.write_all(&big)).await;
         assert!(
