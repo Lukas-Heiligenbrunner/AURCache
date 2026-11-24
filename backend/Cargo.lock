@@ -804,6 +804,8 @@ version = "0.6.0"
 dependencies = [
  "hex",
  "jiff 1.0.1",
+ "libc",
+ "rustix",
  "sea-orm",
  "serde",
  "serde_json",
@@ -998,7 +1000,6 @@ dependencies = [
  "percent-encoding",
  "rcgen",
  "reqwest",
- "rustix",
  "serde",
  "serde_json",
  "tar",
