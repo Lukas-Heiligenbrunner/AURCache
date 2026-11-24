@@ -8,9 +8,6 @@
 //! reading the log to its end ends it -- so a test waits on nothing but the
 //! dispatcher itself.
 
-// Each test binary uses its own part of this.
-#![allow(dead_code)]
-
 use anyhow::{Result, bail};
 use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback};
 use aurcache_build_agent::spec::INTERFACE;
@@ -66,8 +63,6 @@ pub enum Call {
 /// One piece of what an exec's stdout does.
 pub enum Step {
     Bytes(Vec<u8>),
-    /// This many zero bytes, made as they are read.
-    Zeros(u64),
     /// Something that happens when the reader gets here.
     Then(Box<dyn FnOnce() + Send>),
     /// The stream breaks: the read fails, as a broken exec's does.
@@ -102,14 +97,6 @@ impl AsyncRead for Played {
                     let rest = bytes.split_off(room.min(bytes.len()));
                     buf.put_slice(&bytes);
                     self.steps.push_front(Step::Bytes(rest));
-                    return Poll::Ready(Ok(()));
-                }
-                Some(Step::Zeros(0)) => {}
-                Some(Step::Zeros(left)) => {
-                    let now = usize::try_from(left).map_or(room, |left| left.min(room));
-                    buf.initialize_unfilled_to(now).fill(0);
-                    buf.advance(now);
-                    self.steps.push_front(Step::Zeros(left - now as u64));
                     return Poll::Ready(Ok(()));
                 }
                 Some(Step::Then(effect)) => effect(),
@@ -166,35 +153,14 @@ fn failed(message: &str) -> ExecEnd {
 #[derive(Clone, Debug)]
 pub struct Package {
     pub name: String,
-    pub content: Content,
-}
-
-#[derive(Clone, Debug)]
-pub enum Content {
-    Bytes(Vec<u8>),
-    /// A file of this many zero bytes, never held whole.
-    Zeros(u64),
+    pub bytes: Vec<u8>,
 }
 
 impl Package {
     pub fn of(name: &str, bytes: &[u8]) -> Self {
         Self {
             name: name.to_string(),
-            content: Content::Bytes(bytes.to_vec()),
-        }
-    }
-
-    pub fn zeros(name: &str, len: u64) -> Self {
-        Self {
-            name: name.to_string(),
-            content: Content::Zeros(len),
-        }
-    }
-
-    pub fn size(&self) -> u64 {
-        match &self.content {
-            Content::Bytes(bytes) => bytes.len() as u64,
-            Content::Zeros(len) => *len,
+            bytes: bytes.to_vec(),
         }
     }
 
@@ -202,14 +168,7 @@ impl Package {
     pub fn artifact(&self) -> Artifact {
         Artifact {
             name: self.name.clone(),
-            size: self.size(),
-        }
-    }
-
-    fn step(&self) -> Step {
-        match &self.content {
-            Content::Bytes(bytes) => Step::Bytes(bytes.clone()),
-            Content::Zeros(len) => Step::Zeros(*len),
+            size: self.bytes.len() as u64,
         }
     }
 }
@@ -517,10 +476,6 @@ impl FakeCluster {
         self.shared.set_status(name, status);
     }
 
-    pub fn remove(&self, name: &str) {
-        self.shared.remove(name);
-    }
-
     /// Resolves once the calls so far satisfy `met`.
     pub async fn until(&self, met: impl Fn(&[Call]) -> bool) {
         let mut called = self.shared.called.subscribe();
@@ -676,7 +631,7 @@ impl FakeCluster {
                 failed("exit code 1; stderr: no such package"),
             );
         };
-        let whole = package.step();
+        let whole = Step::Bytes(package.bytes.clone());
         match script.sends.pop_front().unwrap_or(Sending::Whole) {
             Sending::Whole => played(vec![whole], chunk, ExecEnd::Succeeded),
             Sending::Breaks { after } => {
@@ -972,7 +927,6 @@ pub struct Taken {
 /// What the sink answers an upload with.
 #[derive(Clone, Debug)]
 pub enum Answer {
-    Accepts,
     /// The server will not take this file, whoever sends it.
     Refuses(String),
 }
