@@ -412,6 +412,16 @@ where a build can log in, but need the link to pass
 connection of the build's; they can be added later without changing what a
 build sees.
 
+### What else it does
+
+For the Kubernetes worker, which has no shared directory and reaches the pod
+only through `exec`, the same binary has the other end of each exchange:
+`stage` (install itself into a volume, wait for the job), `receive` (take
+the job from stdin), `tail` (follow the log from an offset), `manifest` (the
+report, the log's length, and each package's name and size), and `send` (one
+package's bytes). `agent/transfer`'s module docs say what each carries. The
+Docker worker uses none of them.
+
 ---
 
 ## The worker's side

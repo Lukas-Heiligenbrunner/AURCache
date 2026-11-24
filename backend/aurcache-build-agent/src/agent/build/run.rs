@@ -1,14 +1,17 @@
 //! The build log, and running one command to its end with its output in it
 //! or kept aside.
 //!
-//! The build log is the agent's stdout, which the worker reads. Each child
-//! writes its stdout and stderr straight to it, and the agent its own lines,
-//! flushed as they are written, so everything is in the order it was written.
+//! The build log is the agent's stdout, which the worker reads, or with
+//! `--log-file` the file `<work>/log/build.log`. Each child writes its stdout
+//! and stderr straight to it, and the agent its own lines, flushed as they
+//! are written, so everything is in the order it was written.
 
 use super::children;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
 /// One line of the agent's own in the build log. A reader that went away
@@ -16,6 +19,29 @@ use std::process::{Command, ExitStatus, Stdio};
 pub fn say(line: &str) {
     let mut stdout = io::stdout().lock();
     let _ = writeln!(stdout, "[agent] {line}").and_then(|()| stdout.flush());
+}
+
+/// Make the file `path` the build log, in place of stdout, for a worker that
+/// follows the log as a file. Root's, and readable by anyone.
+pub fn log_to(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(parent)?;
+    }
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o644)
+        .open(path)?;
+    // SAFETY: both descriptors are open, and `dup2` only replaces the second.
+    if unsafe { libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// The build log, for a child's stdout or stderr. It is made blocking again

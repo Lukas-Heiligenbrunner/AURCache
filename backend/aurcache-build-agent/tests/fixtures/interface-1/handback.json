@@ -1,0 +1,29 @@
+[
+  {
+    "interface": 1,
+    "report": {
+      "interface": 1,
+      "ended": {
+        "how": "exited",
+        "code": 0
+      }
+    },
+    "log_size": 123456,
+    "artifacts": [
+      {
+        "name": "hello-1.0-1-x86_64.pkg.tar.zst",
+        "size": 4096
+      },
+      {
+        "name": "hello-docs-1.0-1-any.pkg.tar.zst",
+        "size": 0
+      }
+    ]
+  },
+  {
+    "interface": 1,
+    "report": null,
+    "log_size": null,
+    "artifacts": []
+  }
+]

@@ -88,10 +88,11 @@ struct Made {
     user: BuildUser,
 }
 
-/// Run the build in `work`, as PID 1 and root. Exits 0 if and only if it
+/// Run the build in `work`, as PID 1 and root, with the build log in
+/// `log_file` instead of stdout when one is named. Exits 0 if and only if it
 /// wrote `<work>/out/report.json`.
-pub fn run(work: &Path) -> ExitCode {
-    match build(&Work::new(work)) {
+pub fn run(work: &Path, log_file: Option<&Path>) -> ExitCode {
+    match build(&Work::new(work), log_file) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
             eprintln!("aurcache-build-agent: {why}");
@@ -102,7 +103,7 @@ pub fn run(work: &Path) -> ExitCode {
 
 /// The whole build. An error is a build that leaves no report: the agent
 /// could not make sure of the place it writes one to.
-fn build(work: &Work) -> Result<(), String> {
+fn build(work: &Work, log_file: Option<&Path>) -> Result<(), String> {
     init::placed()?;
     init::no_fault_handlers();
     init::undumpable().map_err(|e| format!("making the agent undumpable: {e}"))?;
@@ -115,6 +116,9 @@ fn build(work: &Work) -> Result<(), String> {
         }
     }
     let owner = dirs::take(work).map_err(|e| format!("taking {}: {e}", work.root().display()))?;
+    if let Some(path) = log_file {
+        run::log_to(path).map_err(|e| format!("opening the build log {}: {e}", path.display()))?;
+    }
 
     let spec = read_spec(work);
     let made = match &spec {

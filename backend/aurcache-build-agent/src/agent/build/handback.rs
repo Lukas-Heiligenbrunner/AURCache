@@ -49,7 +49,7 @@ pub fn give(work: &Work, owner: Owner) {
     give_dir(&work.pkg(), owner);
     give_dir(&work.out(), owner);
     if let Ok(root) = dirs::open(work.root()) {
-        let _ = fchown(&root, Some(owner.uid), Some(owner.gid));
+        give_handle(&root, owner, 0o755);
     }
 }
 
@@ -94,7 +94,7 @@ fn open_file(path: &Path) -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{give_dir, write};
+    use super::{give, give_dir, write};
     use crate::agent::build::dirs::Owner;
     use aurcache_build_agent::layout::Work;
     use aurcache_build_agent::report::{BuildReport, Ended};
@@ -178,5 +178,15 @@ mod tests {
         assert_eq!(mode(&secret), 0o600);
         assert_eq!(mode(&pkg), 0o755);
         assert!(pkg.join("dir/deeper").is_dir());
+    }
+
+    /// A scriptlet's `chmod 700 /work` does not hide the hand-back.
+    #[test]
+    fn the_work_directory_is_readable_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(tmp.path(), PermissionsExt::from_mode(0o700)).unwrap();
+        give(&Work::new(tmp.path()), own());
+        let mode = std::fs::metadata(tmp.path()).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o755);
     }
 }

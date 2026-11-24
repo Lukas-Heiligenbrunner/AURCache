@@ -5,6 +5,7 @@
 //! directory, however it was produced.
 
 use anyhow::{Context, Result};
+use aurcache_common::artifact::is_artifact;
 use aurcache_common::beneath;
 use std::fs::File;
 use std::io;
@@ -57,12 +58,13 @@ pub fn discover_artifacts(dir: &Path) -> io::Result<Vec<Artifact>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut names: Vec<String> = dir
-        .names()?
-        .into_iter()
-        .filter_map(|name| name.into_string().ok())
-        .filter(|name| is_artifact(name))
-        .collect();
+    let mut names = Vec::new();
+    for name in dir.names()? {
+        match name?.into_string() {
+            Ok(name) if is_artifact(&name) => names.push(name),
+            _ => {}
+        }
+    }
     names.sort();
     let mut out = Vec::new();
     for name in names {
@@ -73,25 +75,6 @@ pub fn discover_artifacts(dir: &Path) -> io::Result<Vec<Artifact>> {
         out.push(Artifact { name, file, len });
     }
     Ok(out)
-}
-
-/// True for a built package artifact filename.
-///
-/// The character allow-list matters: these names come from whatever the
-/// PKGBUILD wrote into the build directory and are then used as a URL path
-/// segment and a repo-tree filename. Restricting to the set alpm actually
-/// produces (`pkgname-pkgver-pkgrel-arch.pkg.tar.*`, where epoch contributes
-/// `:` and pkgver may contain `+`, `.`, `_`, `~`) keeps a hostile or merely
-/// broken PKGBUILD from smuggling separators or traversal through either.
-#[must_use]
-pub fn is_artifact(name: &str) -> bool {
-    !name.starts_with('.')
-        && name.contains(".pkg.tar")
-        && !name.ends_with(".sig")
-        && !name.ends_with(".part")
-        && name.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | ':' | '~' | '@')
-        })
 }
 
 #[cfg(test)]
@@ -204,31 +187,5 @@ mod tests {
         let found = discover_artifacts(dir.path()).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "hello-1.0-1-x86_64.pkg.tar.zst");
-    }
-
-    #[test]
-    fn is_artifact_rules() {
-        assert!(is_artifact("a-1-1-x86_64.pkg.tar.zst"));
-        assert!(is_artifact("a-1-1-x86_64.pkg.tar.xz"));
-        assert!(!is_artifact("a-1-1-x86_64.pkg.tar.zst.sig"));
-        assert!(!is_artifact(".x.pkg.tar.zst"));
-        assert!(!is_artifact("PKGBUILD"));
-    }
-
-    /// Real alpm version syntax must survive the character allow-list.
-    #[test]
-    fn is_artifact_accepts_epoch_and_pkgver_punctuation() {
-        assert!(is_artifact("foo-2:1.0_beta+3~rc1-1-x86_64.pkg.tar.zst"));
-        assert!(is_artifact("lib32-gcc-libs-14.2-1-x86_64.pkg.tar.zst"));
-    }
-
-    /// Names that would corrupt the upload URL or escape the repo directory.
-    #[test]
-    fn is_artifact_rejects_url_and_path_hostile_names() {
-        assert!(!is_artifact("evil?x=1.pkg.tar.zst"));
-        assert!(!is_artifact("evil#frag.pkg.tar.zst"));
-        assert!(!is_artifact("../../etc/passwd.pkg.tar.zst"));
-        assert!(!is_artifact("a b-1-1-x86_64.pkg.tar.zst"));
-        assert!(!is_artifact("a%2f-1-1-x86_64.pkg.tar.zst"));
     }
 }

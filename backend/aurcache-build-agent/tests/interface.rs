@@ -1,10 +1,12 @@
 //! The agent's interface as JSON, held as fixtures.
 //!
 //! The agent and the worker that runs it may be different builds: a worker
-//! can be handed another agent (`WORKER_BUILD_AGENT`). So the spec a worker
-//! writes and the report the agent writes are frozen for each interface
-//! number under `fixtures/interface-<n>/`, and each fixture must decode and
-//! encode back to exactly the same JSON.
+//! can be handed another agent (`WORKER_BUILD_AGENT`), and the Kubernetes
+//! worker's agent comes from an image that the operator names. So the spec
+//! that a worker writes, the report that the agent writes and the hand-back
+//! that it prints are frozen for each interface number under
+//! `fixtures/interface-<n>/`, and each fixture must decode and encode back to
+//! exactly the same JSON.
 //!
 //! Within an interface these types only gain optional fields, and a new one
 //! is `#[serde(default, skip_serializing_if = "Option::is_none")]`, which
@@ -15,7 +17,7 @@
 //! a new interface. A fixture already committed is never rewritten to make
 //! this pass: that is the break it exists to catch.
 
-use aurcache_build_agent::report::{BuildReport, Ended, SetupStep};
+use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback, SetupStep};
 use aurcache_build_agent::spec::{BuildSpec, INTERFACE, SshAccess};
 use aurcache_common::worker::JobVcsSource;
 use serde::Serialize;
@@ -147,6 +149,30 @@ fn reports() -> Vec<BuildReport> {
     all
 }
 
+fn handbacks() -> Vec<Handback> {
+    let artifact = |name: &str, size| Artifact {
+        name: name.to_string(),
+        size,
+    };
+    vec![
+        Handback {
+            interface: INTERFACE,
+            report: Some(report(Ended::Exited { code: 0 })),
+            log_size: Some(123_456),
+            artifacts: vec![
+                artifact("hello-1.0-1-x86_64.pkg.tar.zst", 4096),
+                artifact("hello-docs-1.0-1-any.pkg.tar.zst", 0),
+            ],
+        },
+        Handback {
+            interface: INTERFACE,
+            report: None,
+            log_size: None,
+            artifacts: Vec::new(),
+        },
+    ]
+}
+
 #[test]
 fn spec() {
     check("spec", &specs());
@@ -155,6 +181,11 @@ fn spec() {
 #[test]
 fn build_report() {
     check("report", &reports());
+}
+
+#[test]
+fn handback() {
+    check("handback", &handbacks());
 }
 
 /// A worker of a later build may add an optional field the agent does not
@@ -172,11 +203,32 @@ fn a_spec_with_an_unknown_field_still_reads() {
     }
 }
 
+/// An agent of a later build may add an optional field that the worker does
+/// not know; the worker reads the report and the hand-back anyway.
+#[test]
+fn a_report_or_handback_with_an_unknown_field_still_reads() {
+    let added = |sample: &mut Value| {
+        let object = sample.as_object_mut().unwrap();
+        object.insert("added_later".to_string(), Value::from("x"));
+    };
+    for mut sample in check("report", &reports()) {
+        added(&mut sample);
+        serde_json::from_value::<BuildReport>(sample).unwrap();
+    }
+    for mut sample in check("handback", &handbacks()) {
+        added(&mut sample);
+        if let Some(Value::Array(artifacts)) = sample.get_mut("artifacts") {
+            artifacts.iter_mut().for_each(added);
+        }
+        serde_json::from_value::<Handback>(sample).unwrap();
+    }
+}
+
 /// The interface number is in every document, where the agent and a worker
 /// read it before anything else.
 #[test]
 fn every_document_carries_the_interface() {
-    for name in ["spec", "report"] {
+    for name in ["spec", "report", "handback"] {
         let text = std::fs::read_to_string(fixture(name)).unwrap();
         let samples: Vec<Value> = serde_json::from_str(&text).unwrap();
         for sample in samples {
