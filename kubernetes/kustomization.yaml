@@ -41,6 +41,14 @@ labels:
 
 resources:
   - server
+  # The Kubernetes worker: a small unprivileged pod here that builds each
+  # package in a pod of its own, in a namespace of its own (kube-worker/,
+  # which also applies by itself after server/). It needs no privileged pod,
+  # so comment out components/chroot-workers below when it is the only
+  # worker, and the namespace stays at `baseline`. Its image is set in
+  # kube-worker/kustomization.yaml, which says how to pin it, and not in
+  # `images:` here.
+  # - kube-worker
 
 # The workers. Each component adds one kind, and they can be combined.
 components:

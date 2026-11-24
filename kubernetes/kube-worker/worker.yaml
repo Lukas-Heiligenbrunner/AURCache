@@ -1,0 +1,153 @@
+# The Kubernetes worker's dispatcher: one worker to the server, which builds
+# each job in a pod of its own in `aurcache-builds`. See
+# docs/docs/workers/kubernetes.md for every variable below.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aurcache-kube-worker-data
+  namespace: aurcache
+  labels:
+    app.kubernetes.io/name: aurcache-kube-worker
+    app.kubernetes.io/component: kube-worker
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # storageClassName: <yours>
+  resources:
+    requests:
+      # The worker's identity. Lose it and the worker enrolls again, as a new
+      # and unapproved one.
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurcache-kube-worker
+  namespace: aurcache
+  labels:
+    app.kubernetes.io/name: aurcache-kube-worker
+    app.kubernetes.io/component: kube-worker
+spec:
+  # Exactly one, and Recreate: two pods with one identity abandon each
+  # other's builds. For more builds at once, raise WORKER_CONCURRENCY_DEFAULT;
+  # a second worker needs a builds namespace of its own.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aurcache-kube-worker
+      app.kubernetes.io/component: kube-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aurcache-kube-worker
+        app.kubernetes.io/component: kube-worker
+    spec:
+      serviceAccountName: aurcache-kube-worker
+      enableServiceLinks: false
+      # Time to report the running builds as interrupted and delete their pods.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          # Also the image build pods take the agent from: kustomization.yaml
+          # keeps WORKER_KUBE_AGENT_IMAGE equal to it.
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube:git
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: RUST_LOG
+              value: info
+            # The host must be one of the server's AURCACHE_TLS_SANS.
+            - name: AURCACHE_URL
+              value: https://aurcache.aurcache.svc:8083
+            # The repository as builds reach it, in-cluster.
+            - name: AURCACHE_REPO_URL
+              value: http://aurcache.aurcache.svc:8081
+            - name: AURCACHE_ENROLLMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aurcache-enrollment
+                  key: token
+                  optional: true
+            # - name: AURCACHE_SERVER_CA_FINGERPRINT
+            #   value: <sha256>
+            - name: WORKER_DATA_DIR
+              value: /var/lib/aurcache-worker
+            - name: WORKER_CONCURRENCY_DEFAULT
+              value: "2"
+            # This worker's own image; change both together.
+            - name: WORKER_KUBE_AGENT_IMAGE
+              value: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube:git
+            # The Role and NetworkPolicy here are for this namespace.
+            - name: WORKER_KUBE_NAMESPACE
+              value: aurcache-builds
+            # Unset, only the architecture this pod runs on.
+            # - name: WORKER_ARCHES
+            #   value: x86_64,aarch64
+            # - name: WORKER_KUBE_BUILDER_IMAGE
+            #   value: ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest
+            # - name: WORKER_KUBE_IMAGE_PULL_POLICY
+            #   value: IfNotPresent
+            # Per-build limits, which are also what a build pod requests.
+            # - name: WORKER_BUILD_MEMORY_MAX_DEFAULT
+            #   value: 8G
+            # - name: WORKER_BUILD_CPUS_DEFAULT
+            #   value: "4"
+            # - name: WORKER_BUILD_DISK_MAX_DEFAULT
+            #   value: 30G
+            # An SSH key for private sources, from a Secret in this namespace
+            # mounted below. It stays in this pod; builds can use it while
+            # they run, and never copy it.
+            # - name: WORKER_GIT_SSH_KEY
+            #   value: /etc/aurcache-ssh/ssh-privatekey
+            # - name: WORKER_SSH_KNOWN_HOSTS
+            #   value: /etc/aurcache-ssh/known_hosts
+            # Scheduling fields for build pods, from a JSON file.
+            # - name: WORKER_KUBE_POD_TEMPLATE
+            #   value: /etc/aurcache/pod-template.json
+          # About 15 MiB plus WORKER_CONCURRENCY + 1 times the largest source.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/aurcache-worker
+            - name: tmp
+              mountPath: /tmp
+            # - name: pod-template
+            #   mountPath: /etc/aurcache
+            #   readOnly: true
+            # - name: build-ssh
+            #   mountPath: /etc/aurcache-ssh
+            #   readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: aurcache-kube-worker-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        # - name: pod-template
+        #   configMap:
+        #     name: aurcache-pod-template
+        # - name: build-ssh
+        #   secret:
+        #     secretName: aurcache-build-ssh
+        #     defaultMode: 0440

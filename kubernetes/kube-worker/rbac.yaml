@@ -1,0 +1,60 @@
+# The dispatcher's only role is in the builds' namespace.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aurcache-kube-worker
+  namespace: aurcache
+  labels:
+    app.kubernetes.io/name: aurcache-kube-worker
+    app.kubernetes.io/component: kube-worker
+---
+# Build pods' account: bound to nothing, token never mounted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aurcache-build
+  namespace: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-build
+    app.kubernetes.io/component: kube-worker
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aurcache-kube-worker
+  namespace: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-kube-worker
+    app.kubernetes.io/component: kube-worker
+rules:
+  # `deletecollection` sweeps build pods when the dispatcher starts and stops.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, list, watch, delete, deletecollection]
+  # `get` is for the WebSocket upgrade, which some API servers authorize so.
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create, get]
+  # The last lines of a build container that left no report.
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aurcache-kube-worker
+  namespace: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-kube-worker
+    app.kubernetes.io/component: kube-worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aurcache-kube-worker
+subjects:
+  - kind: ServiceAccount
+    name: aurcache-kube-worker
+    namespace: aurcache

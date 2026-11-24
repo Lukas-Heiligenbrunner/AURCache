@@ -1,0 +1,19 @@
+# An optional ceiling on all builds together; keep WORKER_CONCURRENCY within
+# it, since a build that it refuses is handed back. A CPU or memory line needs
+# the per-build limits set: see "Limits are best effort" in
+# docs/docs/workers/kubernetes.md.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: aurcache-builds
+  namespace: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-builds
+    app.kubernetes.io/component: kube-worker
+spec:
+  hard:
+    # Pods that have not ended.
+    pods: "8"
+    # requests.cpu: "32"
+    # requests.memory: 64Gi
+    # requests.ephemeral-storage: 400Gi
