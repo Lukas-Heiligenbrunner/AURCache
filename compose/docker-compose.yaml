@@ -56,7 +56,7 @@ services:
       # dials. In-compose that is the service name `aurcache`; keep `localhost`
       # so the UI/API is reachable from the host too.
       - AURCACHE_TLS_SANS=aurcache,localhost
-      # Public base URL pacman clients (and workers) use to fetch built packages.
+      # Public base URL pacman clients use to fetch built packages.
       # Set this to your host's address/domain for remote pacman clients.
       - AURCACHE_PUBLIC_URL=http://localhost:${AURCACHE_MIRROR_PORT:-8081}
       # Bundled enrollment: auto-approve any worker that can write to the shared

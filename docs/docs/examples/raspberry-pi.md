@@ -25,7 +25,7 @@ docker compose up -d
 `backend` is the server without a builder; a `bundle` file would also start a
 worker on the Pi itself (see below). As on any host:
 
-- Set `AURCACHE_PUBLIC_URL` to how the worker and pacman clients reach the Pi,
+- Set `AURCACHE_PUBLIC_URL` to how pacman clients reach the Pi,
   e.g. `http://192.168.1.10:8081`. The default `http://localhost:8081` only
   works from the Pi itself.
 - Publish ports `8080` (web UI + API), `8081` (pacman repository) and `8083`
