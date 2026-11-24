@@ -265,17 +265,26 @@ jobs:
   # The build agent, statically linked as it ships, running builds in the
   # builder image under a build container's flags: a package builds, a
   # hostile PKGBUILD stays confined, and a killed build leaves nothing
-  # running. Docker only. Its arm64 leg needs qemu, which this runner does
-  # not register, so it is skipped here.
+  # running. Docker only. The builder image is this tree's, so a change to it
+  # is tested here. Its arm64 leg needs qemu, which this runner does not
+  # register, so it is skipped here.
   buildAgentTest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # build-images.sh checks for them before any image.
+          submodules: recursive
 
       - name: Update local toolchain
         run: rustup update
 
+      - name: Build the builder image
+        run: ./scripts/build-images.sh --images builder --platforms linux/amd64 --tag ci local
+
       - name: Build agent test
+        env:
+          BUILDER_IMAGE: local/aurcache-builder-v2:ci
         run: ./scripts/test-build-agent.sh
 
   # No e2e job here: the full suite builds images and hits the real AUR and
