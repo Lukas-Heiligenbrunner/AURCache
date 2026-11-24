@@ -18,18 +18,17 @@ use aurcache_build_agent::report::{Artifact, Handback};
 use aurcache_build_agent::spec::SshAccess;
 use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor, MirrorlistOffer};
 use aurcache_worker_container::input::{self, Packed};
+use aurcache_worker_container::job;
 use aurcache_worker_container::outcome::{Ending, MemoryLimit, complete};
 use aurcache_worker_container::spec::{self, SpecOptions};
-use aurcache_worker_container::ssh::{self, Credential};
 use aurcache_worker_core::artifacts::is_artifact;
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::{ClaimedJob, Executor};
 use aurcache_worker_core::live::Live;
-use aurcache_worker_core::protocol::{self, PackagesRefused, Stop, StopWatch};
+use aurcache_worker_core::protocol::{PackagesRefused, Stop, StopWatch};
 use aurcache_worker_core::report;
 use aurcache_worker_core::settings::WorkerSettings;
-use aurcache_worker_core::ssh_key;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Fuse, FusedFuture};
 use k8s_openapi::api::core::v1::Pod;
@@ -453,42 +452,17 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
         let cfg = self.cfg.current();
         let build_id = claimed.job.build_id;
         let pod = render(&cfg, &claimed)?;
-        // Decided before anything is prepared and said first in the build
-        // log, so a fetch that fails for want of a key has the reason above
-        // it. This worker holds no named key, so none is ever withheld.
-        let held = ssh::held(cfg.credential.as_ref());
-        let offer = ssh_key::offer(&claimed.job, &held, true);
-        if let Some(notice) = offer.notice(&claimed.job.pkgbase) {
-            protocol::log(&client, build_id, &format!("[worker] {notice}\n")).await;
-        }
-        let source = client
-            .source(build_id)
-            .await
-            .context("downloading source")?;
-        // An ssh-agent of this build's own, started from the files as they
-        // are now, so that a key or host keys changed in the Secret are
-        // used from the next build on. It is killed when this returns.
-        let credential: Option<Credential> = match offer.key() {
-            Some(files) => match files.load().await {
-                Ok(credential) => Some(credential),
-                Err(error) => {
-                    return Ok(report::interrupted(format!(
-                        "the worker's SSH key could not be used: {error:#}"
-                    )));
-                }
-            },
-            None => None,
-        };
-        let ssh = credential.as_ref().map(|credential| SshAccess {
-            known_hosts: credential.known_hosts.clone(),
-        });
-        let ssh_agent = credential
+        // Its ssh-agent is killed when this returns.
+        let prepared = job::prepare(&client, &claimed, cfg.credential.as_ref()).await?;
+        let ssh_agent = prepared
+            .credential
             .as_ref()
             .map(|credential| credential.agent.socket().to_path_buf());
-        let spec = spec::for_job(&claimed, client.repo(), options(&cfg, ssh));
+        let options = options(&cfg, prepared.ssh_access());
+        let spec = spec::for_job(&claimed, client.repo(), options);
         // The source is moved into the input, not copied: it is held once,
         // until the pod has it.
-        let input = input::pack(&spec, source)?;
+        let input = input::pack(&spec, prepared.source)?;
         let log = BuildLog::open(Arc::clone(&client), build_id);
         let build = Build {
             claimed: &claimed,

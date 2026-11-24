@@ -9,6 +9,7 @@
 //! pod of its own is left. Told twice, it stops at once.
 
 use anyhow::{Result, bail};
+use aurcache_worker_container::arch::ARCHES;
 use aurcache_worker_core::enroll;
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
@@ -22,9 +23,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const KIND: &str = KubeExecutor::<KubeCluster>::KIND;
-/// The architectures this worker's image is built for: every build pod runs
-/// the agent from it, so a build for any other could not start.
-const ARCHES: [&str; 3] = ["x86_64", "aarch64", "armv7h"];
 /// How long the builds held when this worker is told to stop get to be
 /// stopped and reported. Under the Deployment's termination grace period, so
 /// that the pods are deleted before the kubelet kills this process.

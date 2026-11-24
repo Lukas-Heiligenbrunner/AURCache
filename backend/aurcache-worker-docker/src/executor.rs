@@ -40,9 +40,8 @@ use crate::link;
 use crate::network::{self, NetworkPlan};
 use crate::workdir::{self, Report};
 use aurcache_build_agent::spec::SshAccess;
-use aurcache_worker_container::ssh;
+use aurcache_worker_container::job;
 use aurcache_worker_container::ssh::agent::Agent;
-use aurcache_worker_core::ssh_key;
 
 /// Builds each package in a container spawned from the builder image.
 pub struct DockerExecutor {
@@ -213,31 +212,11 @@ impl DockerExecutor {
         target: &Target<'_>,
     ) -> Result<CompleteReport> {
         let build_id = claimed.job.build_id;
-        // Decided before anything is prepared and said first in the build
-        // log, so a fetch that fails for want of a key has the reason above
-        // it. This worker holds no named key, so none is ever withheld.
-        let held = ssh::held(cfg.credential.as_ref());
-        let offer = ssh_key::offer(&claimed.job, &held, true);
-        if let Some(notice) = offer.notice(&claimed.job.pkgbase) {
-            log(client, build_id, &format!("[worker] {notice}\n")).await;
-        }
-        let source = client
-            .source(build_id)
-            .await
-            .context("downloading source")?;
-        // An ssh-agent of this build's own, started from the files as they
-        // are now, so that a changed key or host keys are used from the next
-        // build on.
-        let credential = match offer.key() {
-            Some(files) => Some(files.load().await.context("the worker's SSH key")?),
-            None => None,
-        };
-        let ssh = credential.as_ref().map(|credential| SshAccess {
-            known_hosts: credential.known_hosts.clone(),
-        });
-        let agent = credential.map(|credential| credential.agent);
+        let prepared = job::prepare(client, claimed, cfg.credential.as_ref()).await?;
+        let ssh = prepared.ssh_access();
+        let agent = prepared.credential.map(|credential| credential.agent);
         let spec = spec::for_job(claimed, client.repo(), spec_options(cfg, ssh));
-        workdir::prepare(&target.dirs.local, &self.agent, &spec, &source)
+        workdir::prepare(&target.dirs.local, &self.agent, &spec, &prepared.source)
             .context("preparing the build directory")?;
 
         self.pull_image(cfg, client, build_id, target.platform)
