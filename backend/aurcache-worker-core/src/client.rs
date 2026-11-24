@@ -673,4 +673,65 @@ mod tests {
         assert!(ca_fingerprint(key).is_err());
         assert!(ca_fingerprint("not a pem").is_err());
     }
+
+    /// Answers each upload with 200 once its whole declared body arrived,
+    /// and with nothing when the body ends short.
+    async fn upload_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut seen = Vec::new();
+                let mut chunk = [0; 1024];
+                while let Ok(read @ 1..) = socket.read(&mut chunk).await {
+                    seen.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&seen);
+                    let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                        continue;
+                    };
+                    let declared = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .and_then(|len| len.parse::<usize>().ok())
+                        .unwrap();
+                    if body.len() >= declared {
+                        let ok = b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n";
+                        socket.write_all(ok).await.unwrap();
+                        break;
+                    }
+                }
+            }
+        });
+        base
+    }
+
+    fn plain_client(base: &str) -> WorkerClient {
+        WorkerClient {
+            repo: None,
+            upload_http: Client::new(),
+            http: Client::new(),
+            base: base.to_string(),
+            registration: std::sync::Mutex::new(None),
+            lease: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The Kubernetes worker relies on this to catch a package stream that
+    /// was cut short: with its length declared, a body that ends early
+    /// fails the upload instead of sending a shorter file.
+    #[tokio::test]
+    async fn an_upload_whose_body_ends_short_of_its_length_fails() {
+        let client = plain_client(&upload_server().await);
+        let whole = client.upload_artifact(1, "a.pkg.tar.zst", &b"0123456789"[..], Some(10));
+        whole.await.unwrap();
+        let short = client.upload_artifact(1, "a.pkg.tar.zst", &b"01234"[..], Some(10));
+        let error = tokio::time::timeout(Duration::from_secs(10), short)
+            .await
+            .expect("the short upload should fail, not wait")
+            .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains("artifact request"), "{error}");
+        assert!(error.contains("early end"), "{error}");
+    }
 }
