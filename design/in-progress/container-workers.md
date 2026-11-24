@@ -18,6 +18,9 @@ being a compatibility path.
 
 Related:
 
+- `kubernetes-executor.md`: the Kubernetes worker, which builds on all of
+  this, and the spike that showed how little a build container needs ("Pod
+  Security `baseline` for builds").
 - `design/proposed/build-runner.md`: the same move for the chroot worker (the
   PKGBUILD only ever runs inside the build's own container, from inputs that
   are data), which has not been made yet.
@@ -411,6 +414,16 @@ where a build can log in, but need the link to pass
 `session-bind@openssh.com` and to keep one connection to `ssh-agent` per
 connection of the build's; they can be added later without changing what a
 build sees.
+
+### What else it does
+
+For the Kubernetes worker, which has no shared directory and reaches the pod
+only through `exec`, the same binary has the other end of each exchange:
+`stage` (install itself into a volume, wait for the job), `receive` (take
+the job from stdin), `tail` (follow the log from an offset), `manifest` (the
+report, and each package's name and size), `send` (one package's
+bytes), and `hold` (keep the pod up). The module docs of the agent's
+`agent/transfer` say what each carries. The Docker worker uses none of them.
 
 ---
 
