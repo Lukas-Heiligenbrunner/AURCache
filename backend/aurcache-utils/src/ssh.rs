@@ -41,6 +41,15 @@ impl KeySource {
             Self::Provided(path) | Self::Generated(path) => path,
         }
     }
+
+    /// The path, when the key is the server's own.
+    #[must_use]
+    pub fn own(&self) -> Option<&Path> {
+        match self {
+            Self::Generated(path) => Some(path),
+            Self::Provided(_) => None,
+        }
+    }
 }
 
 /// Where host keys are judged from.
@@ -57,6 +66,49 @@ impl HostKeySource {
     fn path(&self) -> &Path {
         match self {
             Self::Pinned(path) | Self::TrustOnFirstUse(path) => path,
+        }
+    }
+
+    /// The path, when the file is the server's own.
+    #[must_use]
+    pub fn own(&self) -> Option<&Path> {
+        match self {
+            Self::TrustOnFirstUse(path) => Some(path),
+            Self::Pinned(_) => None,
+        }
+    }
+}
+
+/// The SSH key and the `known_hosts` file the server is configured with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshFiles {
+    pub key: KeySource,
+    pub known_hosts: HostKeySource,
+}
+
+impl SshFiles {
+    /// The server's own files in `dir`.
+    #[must_use]
+    pub fn own(dir: &Path) -> Self {
+        Self {
+            key: KeySource::Generated(dir.join(KEY_FILE)),
+            known_hosts: HostKeySource::TrustOnFirstUse(dir.join(KNOWN_HOSTS_FILE)),
+        }
+    }
+
+    /// The files in `AURCACHE_SSH_DIR`, or the operator's where
+    /// `AURCACHE_GIT_SSH_KEY` or `AURCACHE_SSH_KNOWN_HOSTS` names one.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let own = Self::own(&aurcache_common::fs::ssh_dir());
+        Self {
+            key: provided_key().map_or(own.key, KeySource::Provided),
+            known_hosts: AURCACHE_SSH_KNOWN_HOSTS
+                .get_os()
+                .filter(|v| !v.is_empty())
+                .map_or(own.known_hosts, |path| {
+                    HostKeySource::Pinned(PathBuf::from(path))
+                }),
         }
     }
 }
@@ -113,16 +165,8 @@ impl SshAccess {
     /// else, and each SSH source then fails saying why.
     #[must_use]
     pub fn load(log: ActivityLog) -> Self {
-        let dir = aurcache_common::fs::ssh_dir();
-        let key = match provided_key() {
-            Some(path) => KeySource::Provided(path),
-            None => KeySource::Generated(dir.join(KEY_FILE)),
-        };
-        let hosts = match AURCACHE_SSH_KNOWN_HOSTS.get_os().filter(|v| !v.is_empty()) {
-            Some(path) => HostKeySource::Pinned(PathBuf::from(path)),
-            None => HostKeySource::TrustOnFirstUse(dir.join(KNOWN_HOSTS_FILE)),
-        };
-        let access = Self::new(key, hosts, log);
+        let files = SshFiles::from_env();
+        let access = Self::new(files.key, files.known_hosts, log);
         match &access.key {
             Ok(identity) => tracing::info!(
                 "SSH key for package sources: {}\n    \

@@ -108,10 +108,11 @@ pub(crate) enum ApiCommand {
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Also export the CA private key, worker certificates, API token
-        /// hashes and the repository signing key, locked if it is. The file
-        /// becomes a credential: anyone holding it can mint a worker this
-        /// server accepts, and sign packages its clients install. Written
-        /// owner-readable only.
+        /// hashes, the repository signing key (locked if it is) and the
+        /// server's own SSH key and known_hosts. The file becomes a
+        /// credential: anyone holding it can mint a worker this server
+        /// accepts, sign packages its clients install, and read every
+        /// repository that the SSH key can read. Written owner-readable only.
         #[arg(long)]
         include_secrets: bool,
     },

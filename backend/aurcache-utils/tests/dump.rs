@@ -7,13 +7,31 @@ use aurcache_common::source::GitSourceSpec;
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::Packages;
 use aurcache_db::{packages, settings, workers};
-use aurcache_utils::dump::{build_dump, write_archive};
+use aurcache_utils::dump::{SecretSources, build_dump, write_archive};
 use aurcache_utils::services::Services;
+use aurcache_utils::ssh::{HostKeySource, KeySource, SshFiles};
 use flate2::read::GzDecoder;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
+
+/// A dump's secrets read from `dir`: the CA, the signing key and the server's
+/// own SSH files.
+fn secrets_in(dir: &std::path::Path) -> SecretSources {
+    SecretSources {
+        ca_dir: dir.to_path_buf(),
+        ssh: SshFiles::own(dir),
+    }
+}
+
+/// The SSH files in `dir`, supplied by the operator.
+fn supplied_ssh(dir: &std::path::Path) -> SshFiles {
+    SshFiles {
+        key: KeySource::Provided(dir.join("id_ed25519")),
+        known_hosts: HostKeySource::Pinned(dir.join("known_hosts")),
+    }
+}
 
 /// A repository of its own for a restore that publishes nothing new.
 fn test_repo() -> aurcache_utils::repository::Repository {
@@ -982,6 +1000,8 @@ async fn a_default_dump_carries_no_secrets() {
         "ca-key.pem",
         "tokens.json",
         "signing-key.asc",
+        "ssh/id_ed25519",
+        "ssh/known_hosts",
     ] {
         assert!(
             !files.contains_key(forbidden),
@@ -1034,8 +1054,10 @@ async fn a_private_dump_carries_the_ca_and_says_so() {
     let key_path = ca_dir.path().join(aurcache_signing::KEY_FILE);
     aurcache_signing::InstanceKey::load_or_create(&key_path, Some("correct horse")).unwrap();
     let key = std::fs::read(&key_path).unwrap();
+    std::fs::write(ca_dir.path().join("id_ed25519"), "SSH KEY").unwrap();
+    std::fs::write(ca_dir.path().join("known_hosts"), "HOSTS").unwrap();
 
-    let dump = build_dump(&source, "test", Some(ca_dir.path()))
+    let dump = build_dump(&source, "test", Some(&secrets_in(ca_dir.path())))
         .await
         .unwrap();
     assert!(dump.manifest.includes_secrets);
@@ -1069,6 +1091,8 @@ async fn a_private_dump_carries_the_ca_and_says_so() {
         "ca-key.pem",
         "tokens.json",
         "signing-key.asc",
+        "ssh/id_ed25519",
+        "ssh/known_hosts",
     ] {
         assert_eq!(modes[secret], 0o600, "{secret}");
     }
@@ -1078,6 +1102,15 @@ async fn a_private_dump_carries_the_ca_and_says_so() {
     let loaded = load_dump(&archive).unwrap().secrets.unwrap();
     assert_eq!(loaded.ca_key_pem, ca.private_key_pem());
     assert_eq!(loaded.signing_key, Some(key));
+    assert_eq!(loaded.ssh_key.as_deref(), Some(&b"SSH KEY"[..]));
+    assert_eq!(loaded.known_hosts.as_deref(), Some(&b"HOSTS"[..]));
+
+    // A supplied file is the operator's, and stays out.
+    let mut supplied = secrets_in(ca_dir.path());
+    supplied.ssh = supplied_ssh(ca_dir.path());
+    let dump = build_dump(&source, "test", Some(&supplied)).await.unwrap();
+    let secrets = dump.secrets.unwrap();
+    assert!(secrets.ssh_key.is_none() && secrets.known_hosts.is_none());
 }
 
 /// Ignoring secrets is the default on the way back in, too. Replacing a CA
@@ -1090,7 +1123,7 @@ async fn restoring_does_not_touch_the_ca_unless_asked() {
     let src_ca = tempfile::tempdir().unwrap();
     aurcache_ca::Ca::load_or_create(src_ca.path()).unwrap();
     let bytes = write_archive(
-        &build_dump(&source, "test", Some(src_ca.path()))
+        &build_dump(&source, "test", Some(&secrets_in(src_ca.path())))
             .await
             .unwrap(),
     )
@@ -1159,7 +1192,7 @@ async fn copying_secrets_replaces_the_ca_and_protects_the_key() {
     aurcache_ca::Ca::load_or_create(src_ca.path()).unwrap();
     let source_key = std::fs::read_to_string(aurcache_ca::key_path(src_ca.path())).unwrap();
     let bytes = write_archive(
-        &build_dump(&source, "test", Some(src_ca.path()))
+        &build_dump(&source, "test", Some(&secrets_in(src_ca.path())))
             .await
             .unwrap(),
     )
@@ -1557,7 +1590,12 @@ async fn dump_with_key(key: Option<&[u8]>) -> Vec<u8> {
     if let Some(key) = key {
         std::fs::write(ca.path().join(KEY_FILE), key).unwrap();
     }
-    write_archive(&build_dump(&source, "test", Some(ca.path())).await.unwrap()).unwrap()
+    write_archive(
+        &build_dump(&source, "test", Some(&secrets_in(ca.path())))
+            .await
+            .unwrap(),
+    )
+    .unwrap()
 }
 
 /// A server whose key file, `KEY_FILE` in `ca_dir`, holds `mine` and is kept

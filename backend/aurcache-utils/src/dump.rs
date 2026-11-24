@@ -9,8 +9,9 @@ use std::io::Write;
 
 use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
-    DumpSecrets, DumpSettings, DumpToken, DumpWorker, MANIFEST_FILE, PACKAGES_FILE, PATCH_DIR,
-    SETTINGS_FILE, SIGNING_KEY_FILE, TOKENS_FILE, WORKERS_FILE,
+    DumpSecrets, DumpSettings, DumpToken, DumpWorker, KNOWN_HOSTS_FILE, MANIFEST_FILE,
+    PACKAGES_FILE, PATCH_DIR, SETTINGS_FILE, SIGNING_KEY_FILE, SSH_KEY_FILE, TOKENS_FILE,
+    WORKERS_FILE,
 };
 use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_db::api_tokens;
@@ -20,6 +21,9 @@ use aurcache_db::{packages, settings, workers};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use std::path::{Path, PathBuf};
+
+use crate::ssh::SshFiles;
 
 /// Everything a dump carries, before it is packed into an archive.
 ///
@@ -36,16 +40,24 @@ pub struct Dump {
     pub secrets: Option<DumpSecrets>,
 }
 
+/// Where a dump with secrets finds the secrets that are kept as files.
+pub struct SecretSources {
+    /// The CA's directory, which also holds the signing key unless one is
+    /// supplied.
+    pub ca_dir: PathBuf,
+    pub ssh: SshFiles,
+}
+
 /// Read the authored state out of the database.
 ///
-/// `ca_dir` opts the dump into carrying secrets: the CA, the certificates the
-/// workers hold, the API token hashes and the signing key. `None` -- the
-/// default everywhere -- produces a dump that is safe to keep beside ordinary
-/// backups.
+/// `secrets` opts the dump into carrying secrets: the CA, the certificates the
+/// workers hold, the API token hashes, the signing key and the SSH files.
+/// `None` -- the default everywhere -- produces a dump that is safe to keep
+/// beside ordinary backups.
 pub async fn build_dump(
     db: &DatabaseConnection,
     aurcache_version: &str,
-    ca_dir: Option<&std::path::Path>,
+    secrets: Option<&SecretSources>,
 ) -> anyhow::Result<Dump> {
     // Ordered by name so two dumps of the same instance are byte-identical and
     // a dump kept in git shows only real changes.
@@ -78,8 +90,8 @@ pub async fn build_dump(
     }
 
     let settings = build_settings(db, &pkgbase_of_id).await?;
-    let secrets = match ca_dir {
-        Some(dir) => Some(build_secrets(db, dir).await?),
+    let secrets = match secrets {
+        Some(sources) => Some(build_secrets(db, sources).await?),
         None => None,
     };
     let workers = build_workers(db, secrets.is_some()).await?;
@@ -102,24 +114,28 @@ pub async fn build_dump(
     })
 }
 
-/// Read the CA, the token hashes and the signing key.
+/// Read the CA, the token hashes, the signing key and the SSH files.
 ///
-/// The CA and the signing key are read from their files rather than from a
-/// loaded `Ca` or key, deliberately: there is no method anywhere that hands out
-/// a private key already in memory, and this does not add one. Export moves
+/// The CA and the keys are read from their files rather than from a loaded
+/// `Ca` or key, deliberately: there is no method anywhere that hands out a
+/// private key already in memory, and this does not add one. Export moves
 /// files; so does restore.
+///
+/// The SSH files are carried only when they are the server's own: an
+/// operator who supplies one keeps it, and a restore never writes it.
 async fn build_secrets(
     db: &DatabaseConnection,
-    ca_dir: &std::path::Path,
+    sources: &SecretSources,
 ) -> anyhow::Result<DumpSecrets> {
-    let key_path = aurcache_signing::KeyConfig::from_env(ca_dir)
+    let key_path = aurcache_signing::KeyConfig::from_env(&sources.ca_dir)
         .key
         .path()
         .to_path_buf();
-    let ca_dir = ca_dir.to_path_buf();
+    let ca_dir = sources.ca_dir.clone();
     let ca = tokio::task::spawn_blocking(move || aurcache_ca::Ca::load(&ca_dir)).await??;
-    let signing_key =
-        tokio::task::spawn_blocking(move || crate::repository::read_if_there(&key_path)).await??;
+    let signing_key = read_file(Some(&key_path)).await?;
+    let ssh_key = read_file(sources.ssh.key.own()).await?;
+    let known_hosts = read_file(sources.ssh.known_hosts.own()).await?;
     let ca_cert_pem = ca.ca_cert_pem().to_owned();
     let ca_key_pem = ca.private_key_pem().to_owned();
 
@@ -139,7 +155,18 @@ async fn build_secrets(
         ca_key_pem,
         tokens,
         signing_key,
+        ssh_key,
+        known_hosts,
     })
+}
+
+/// The file at `path`, off the async runtime: `None` when there is no path,
+/// or nothing there.
+async fn read_file(path: Option<&Path>) -> anyhow::Result<Option<Vec<u8>>> {
+    let Some(path) = path.map(Path::to_path_buf) else {
+        return Ok(None);
+    };
+    tokio::task::spawn_blocking(move || crate::repository::read_if_there(&path)).await?
 }
 
 /// Settings, re-keyed from `pkg_id` onto pkgbase.
@@ -242,8 +269,14 @@ pub fn write_archive(dump: &Dump) -> anyhow::Result<Vec<u8>> {
             append(&mut tar, CA_CERT_FILE, &secrets.ca_cert_pem, PRIVATE)?;
             append(&mut tar, CA_KEY_FILE, &secrets.ca_key_pem, PRIVATE)?;
             append(&mut tar, TOKENS_FILE, &to_json(&secrets.tokens)?, PRIVATE)?;
-            if let Some(key) = &secrets.signing_key {
-                append(&mut tar, SIGNING_KEY_FILE, key, PRIVATE)?;
+            for (name, file) in [
+                (SIGNING_KEY_FILE, &secrets.signing_key),
+                (SSH_KEY_FILE, &secrets.ssh_key),
+                (KNOWN_HOSTS_FILE, &secrets.known_hosts),
+            ] {
+                if let Some(content) = file {
+                    append(&mut tar, name, content, PRIVATE)?;
+                }
             }
         }
         // Finish explicitly: dropping the encoder would swallow a compression

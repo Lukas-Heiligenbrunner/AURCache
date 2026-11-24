@@ -2,7 +2,7 @@
 
 mod common;
 
-use aurcache_utils::dump::{build_dump, write_archive};
+use aurcache_utils::dump::{SecretSources, build_dump, write_archive};
 use rocket::http::Status;
 
 /// A restore taking a signing key this server cannot sign with is refused
@@ -13,7 +13,11 @@ async fn a_signing_key_this_server_cannot_use_refuses_the_restore() {
     let ca = tempfile::tempdir().unwrap();
     aurcache_ca::Ca::load_or_create(ca.path()).unwrap();
     std::fs::write(ca.path().join(aurcache_signing::KEY_FILE), "not a key").unwrap();
-    let dump = write_archive(&build_dump(&api.db, "test", Some(ca.path())).await.unwrap()).unwrap();
+    let sources = SecretSources {
+        ca_dir: ca.path().to_path_buf(),
+        ssh: aurcache_utils::ssh::SshFiles::own(ca.path()),
+    };
+    let dump = write_archive(&build_dump(&api.db, "test", Some(&sources)).await.unwrap()).unwrap();
 
     for dry_run in [true, false] {
         let response = api

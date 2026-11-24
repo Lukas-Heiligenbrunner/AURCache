@@ -62,8 +62,9 @@ fn dump_file_name(created_at: i64) -> String {
 ///
 /// Authored state only -- build history, logs and the resolved dependency graph
 /// are rebuilt by the next resolve and are not carried. No secrets unless
-/// `include_secrets`: without it the CA, worker certificates, token hashes and
-/// signing key are absent, so it is safe to keep alongside ordinary backups.
+/// `include_secrets`: without it the CA, worker certificates, token hashes,
+/// signing key and SSH files are absent, so it is safe to keep alongside
+/// ordinary backups.
 #[get("/dump?<include_secrets>")]
 pub async fn dump(
     services: &State<Services>,
@@ -81,16 +82,15 @@ pub async fn dump(
         // even when it is entirely legitimate.
         warn!(
             "Exporting a dump WITH SECRETS (CA private key, worker certificates, \
-             token hashes, repository signing key), requested by {}",
+             token hashes, repository signing key, SSH key), requested by {}",
             a.username.as_deref().unwrap_or("an unauthenticated caller")
         );
     }
-    let dump = aurcache_utils::dump::build_dump(
-        &services.db,
-        &version.0,
-        with_secrets.then(|| ca_dir.0.as_path()),
-    )
-    .await?;
+    let sources = with_secrets.then(|| aurcache_utils::dump::SecretSources {
+        ca_dir: ca_dir.0.clone(),
+        ssh: aurcache_utils::ssh::SshFiles::from_env(),
+    });
+    let dump = aurcache_utils::dump::build_dump(&services.db, &version.0, sources.as_ref()).await?;
     services.activity.emit_by(
         Event::DumpExported {
             secrets: with_secrets,
