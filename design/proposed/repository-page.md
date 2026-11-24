@@ -163,8 +163,8 @@ what the rest of the docs already do: the base URL that clients reach the
 repository at, such as `http://192.168.1.10:8081`, which workers use too
 unless their `AURCACHE_REPO_URL` says otherwise, with a link to the worker
 variables in `workers/split-chroot.md`. The note further down the page,
-on what replaced 0.5's settings, says that the `AURCACHE_REPO_URL` there
-is 0.5's server setting.
+on what replaced 0.5's settings, drops `AURCACHE_REPO_URL`, which 0.5
+never had.
 
 Three workers next to the server reach the repository by the server's own
 port, and get `AURCACHE_REPO_URL` for it, as `compose/docker-compose.yaml`
