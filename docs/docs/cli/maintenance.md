@@ -13,9 +13,10 @@ aurcli restore backup.tar.gz --clear     # replace: removes every package, setti
 ```
 
 `--include-secrets` also exports the CA private key, worker certificates, API
-token hashes and the repository's [signing
+token hashes, the repository's [signing
 key](../Configuration/pacman-repo.md#the-key) file as stored (still locked, if
-it is locked; the passphrase is never in a dump) — the file becomes a
+it is locked; the passphrase is never in a dump), and the server's own [SSH
+key and `known_hosts`](../Configuration/ssh-sources.md) — the file becomes a
 credential and is written owner-readable only. Taking the dump's secrets on
 restore (`--secrets copy`, or `--clear`) replaces the CA, which invalidates
 every certificate the server's workers hold.
@@ -37,9 +38,21 @@ when it starts, what it does with the key:
 - `kept (supplied)`: the server signs with `AURCACHE_SIGNING_KEY_FILE`, which a
   restore never writes.
 
-A dump without a key leaves the server's key as it is. Mount the CA directory,
-not the key file alone: a file bind-mounted on its own cannot be replaced, and
-the restore reports that as a failure.
+It takes the dump's SSH key and `known_hosts` the same way. The key is checked
+first as well: if it is not an OpenSSH private key, or has a passphrase,
+nothing is imported. The report gives a line for each, with the same three
+answers, and a replaced file is kept beside the new one as
+`<file>.replaced-<hash>`. Clones use both at once; the Settings page and
+`aurcli ssh key` show the restored key from the server's next start.
+`known_hosts` is replaced, not merged: a host that only this server's file
+listed is trusted on first use again, which the activity log records. A file
+supplied with `AURCACHE_GIT_SSH_KEY` or `AURCACHE_SSH_KNOWN_HOSTS` stays out of
+the dump, and a restore never writes a supplied file.
+
+A dump without one of these files leaves the server's as it is. Mount the
+directory (`AURCACHE_CA_DIR`, `AURCACHE_SSH_DIR`), not a file alone: a file
+bind-mounted on its own cannot be replaced, and the restore reports that as a
+failure.
 
 Values set on workers from AURCache are included in a backup with the worker
 they belong to, and restored with it.

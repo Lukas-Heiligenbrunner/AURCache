@@ -53,7 +53,9 @@ is where to look for hosts that nobody meant to add.
 
 The key lives in `AURCACHE_SSH_DIR` (`./data/ssh`, so `/app/data/ssh` in the
 images), which must be persisted: a server that loses it generates a new one,
-and every remote you added the old one to then refuses it.
+and every remote you added the old one to then refuses it. A dump taken with
+secrets carries the key and `known_hosts`, and restoring it puts them back:
+see [Backup and restore](../cli/maintenance.md).
 
 This key is the server's, for a package's own repository. The sources a
 PKGBUILD downloads while building (its `source=()` array, or a clone in
