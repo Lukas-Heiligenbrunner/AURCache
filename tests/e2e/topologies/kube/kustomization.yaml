@@ -1,0 +1,20 @@
+# The cluster that run.sh tests against: kubernetes/server/ and
+# kubernetes/kube-worker/ as they ship, plus the test's own pieces. run.sh
+# applies it through a kustomization written at run time, which adds what
+# changes per run: the image names it built, the enrollment token, the builder
+# image, and the packages' PKGBUILDs.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - git.yaml
+  - gitssh.yaml
+  - gitssh-policy.yaml
+  - ../../../../kubernetes/server
+  - ../../../../kubernetes/kube-worker
+
+patches:
+  - path: server.yaml
+  - path: worker.yaml

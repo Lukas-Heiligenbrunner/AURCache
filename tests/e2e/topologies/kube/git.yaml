@@ -1,0 +1,105 @@
+# A git daemon serving one repository per test package, at
+# git://kube-e2e-git.kube-e2e.svc/<package>.git, branch master. The server
+# fetches from it; builds never do, so the builds' NetworkPolicy has nothing
+# to allow for it.
+#
+# The PKGBUILDs come from the ConfigMap `kube-e2e-packages`, one key per
+# package (`<package>.PKGBUILD`), which the test's run-time kustomization
+# generates. The image is the builder's, which every node that builds has
+# already and which has git.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-e2e-git
+  namespace: kube-e2e
+  labels:
+    app.kubernetes.io/name: kube-e2e-git
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-e2e-git
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-e2e-git
+    spec:
+      initContainers:
+        - name: repositories
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOME
+              value: /tmp
+          command:
+            - sh
+            - -euc
+            - |
+              for file in /packages/*.PKGBUILD; do
+                name=$(basename "$file" .PKGBUILD)
+                work=/tmp/work/$name
+                mkdir -p "$work"
+                cp "$file" "$work/PKGBUILD"
+                git -C "$work" init -q -b master
+                git -C "$work" add -A
+                git -C "$work" -c user.name=kube-e2e -c user.email=kube-e2e@localhost \
+                    commit -q -m "$name"
+                git clone -q --bare "$work" "/srv/git/$name.git"
+                echo "serving $name"
+              done
+          volumeMounts:
+            - name: packages
+              mountPath: /packages
+            - name: repositories
+              mountPath: /srv/git
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: git
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - git
+            - daemon
+            - --reuseaddr
+            - --export-all
+            - --verbose
+            - --base-path=/srv/git
+            - --listen=0.0.0.0
+            - --port=9418
+            - /srv/git
+          ports:
+            - name: git
+              containerPort: 9418
+          readinessProbe:
+            tcpSocket:
+              port: git
+            periodSeconds: 2
+          volumeMounts:
+            - name: repositories
+              mountPath: /srv/git
+              readOnly: true
+      volumes:
+        - name: packages
+          configMap:
+            name: kube-e2e-packages
+        - name: repositories
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-e2e-git
+  namespace: kube-e2e
+  labels:
+    app.kubernetes.io/name: kube-e2e-git
+spec:
+  selector:
+    app.kubernetes.io/name: kube-e2e-git
+  ports:
+    - name: git
+      port: 9418
+      targetPort: git

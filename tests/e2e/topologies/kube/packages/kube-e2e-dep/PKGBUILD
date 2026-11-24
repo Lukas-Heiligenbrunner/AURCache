@@ -1,0 +1,15 @@
+# The dependency half of the Kubernetes suite's repository check: a package
+# that AURCache builds first, so that kube-e2e-app can only build once its
+# build pod has installed this one from AURCache's own repository.
+pkgname=kube-e2e-dep
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Kubernetes worker test: a dependency served from AURCache's repository"
+arch=('x86_64' 'aarch64' 'armv7h')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+
+package() {
+  install -d "${pkgdir}/usr/share/kube-e2e-dep"
+  echo "kube-e2e-dep marker" > "${pkgdir}/usr/share/kube-e2e-dep/marker"
+}

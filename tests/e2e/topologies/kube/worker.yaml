@@ -1,0 +1,33 @@
+# What the test changes on the shipped worker: the dispatcher's own crates log
+# at debug, every image is taken from the node when it is there, which is
+# where the test loads them, and it holds the SSH key that gitssh.yaml
+# authorises.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurcache-kube-worker
+  namespace: aurcache
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RUST_LOG
+              value: info,aurcache_worker_kube=debug,aurcache_worker_core=debug
+            - name: WORKER_KUBE_IMAGE_PULL_POLICY
+              value: IfNotPresent
+            - name: WORKER_GIT_SSH_KEY
+              value: /etc/aurcache-ssh/ssh-privatekey
+            - name: WORKER_SSH_KNOWN_HOSTS
+              value: /etc/aurcache-ssh/known_hosts
+          volumeMounts:
+            - name: build-ssh
+              mountPath: /etc/aurcache-ssh
+              readOnly: true
+      volumes:
+        - name: build-ssh
+          secret:
+            secretName: aurcache-build-ssh
+            defaultMode: 0440

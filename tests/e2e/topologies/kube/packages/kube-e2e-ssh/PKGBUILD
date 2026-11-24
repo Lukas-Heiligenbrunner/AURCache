@@ -1,0 +1,22 @@
+# A source fetched over git+ssh with the dispatcher's key, and the same server
+# reached again from build(): both go through the dispatcher's SSH link.
+pkgname=kube-e2e-ssh
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Kubernetes worker test: a source over git+ssh"
+arch=('x86_64' 'aarch64' 'armv7h')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+makedepends=('git')
+source=('payload::git+ssh://git@kube-e2e-gitssh.kube-e2e.svc/srv/git/payload.git')
+sha256sums=('SKIP')
+
+build() {
+  echo "kube-e2e-ssh: payload $(cat "$srcdir/payload/marker.txt")"
+  git ls-remote ssh://git@kube-e2e-gitssh.kube-e2e.svc/srv/git/payload.git >/dev/null
+  echo "kube-e2e-ssh: reached the server from build()"
+}
+
+package() {
+  install -Dm644 "$srcdir/payload/marker.txt" "${pkgdir}/usr/share/kube-e2e-ssh/marker"
+}
