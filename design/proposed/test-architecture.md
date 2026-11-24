@@ -86,7 +86,7 @@ scratch.
 | #435 | `aurcache-utils/tests/ssh_clone.rs` (server clones over SSH from a throwaway `sshd`, per push); a third `test-e2e-ssh.sh` phase for the same server-side clone through the API; `docker/testpkg/ssh-source-fixture/`; changes to `git-ssh.Dockerfile` and its entrypoint |
 | #438 | The Kubernetes worker: `kubernetes/kube-worker/`, `docker/kube-worker.Dockerfile`, `docker/build-rust.sh`. Built on #446, whose test additions it carries. |
 | #446 | `scripts/test-build-agent.sh`, a new per-push job (~3 min): the static build agent in the builder image under a build container's flags; legs: `hello` builds, a hostile build (becoming root, root's processes, the report and work directory, a dependency scriptlet's leftover process, a repository the image's upgrade must not see, a forged `--printsrcinfo`), a build killed half-way, arm64 under qemu where registered. `docker/testpkg/agent-hostile/`, `docker/testpkg/agent-thief/`. Hybrid-legacy now runs on the agent, and the Docker worker reports disk usage. |
-| #447 | `tests/e2e/topologies/kube/run.sh` (1452 lines, ~20 min locally, ~10 GB) and `e2e-kube.yml`, nightly and on a `run-e2e-kube` label. Eleven legs: enrollment, NetworkPolicy, ResourceQuota, a dependency only in AURCache's repository, SSH through the agent with a thief dependency, cancel, worker killed, worker pod deleted, pod that cannot start, a 2 GiB package, user namespaces, policy removed. Beside it in `tests/e2e/topologies/kube/`: the overlays, gitssh and five packages (`packages/`); the 2 GiB package is `tests/fixtures/packages/big/`. Deploys `kubernetes/server/` and `kubernetes/kube-worker/` as shipped: its `kustomization.yaml` names them as `../../../../kubernetes/server` and `../../../../kubernetes/kube-worker`. It is the first PR to put its files where this layout says. |
+| #447 | `tests/e2e/topologies/kube/run.sh` (947 lines, ~20 min locally, ~10 GB), a second job (`e2eKube`) in `e2e-nightly.yml`, nightly and on a `run-e2e-kube` label. Ten legs: enrollment, NetworkPolicy (with a control), a build, a dependency only in AURCache's repository, git+ssh through the dispatcher's SSH link, worker killed, worker pod deleted, a build that cannot start, a 2 GiB package, and `aurcache-worker-kube`'s live tests. Beside it in `tests/e2e/topologies/kube/`: the overlays, gitssh and five packages (`packages/`). Deploys `kubernetes/server/` and `kubernetes/kube-worker/` as shipped: its `kustomization.yaml` names them as `../../../../kubernetes/server` and `../../../../kubernetes/kube-worker`. It is the first PR to put its files where this layout says. |
 | #450 | A `test-sandbox.sh` leg: a build is refused the socket of every ssh-agent but the one it is offered (Landlock `RESOLVE_UNIX`, Linux 7.1). A `test-e2e-ssh.sh` phase: a named key reaches only the package that names it, and a key the worker lacks is built without. Another: a named key whose file a build could read stops the worker from starting (one more stack cycle, which never builds). The same leg with the policy at `0600 root`: the sandbox, asked as the build user, answers `no-resolve-unix: bad policy`. Unit tests for the key name a job carries, the offer, the named-key list, the key-file check and the gate. |
 | #452 | Two `test-e2e-ssh.sh` phases: `WORKER_SSH_KNOWN_HOSTS` naming the server builds, naming another host is refused. Unit tests for staging and binding `known_hosts`. |
 | #482 | `test-build-agent.sh`'s hostile leg gains SSH: a git+ssh source and `build()` reach a throwaway server (`git-ssh.Dockerfile` reused) through the link, served by a stand-in worker (`aurcache-worker-container`'s `ssh-link-serve` example); the key is hunted from `build()`, and from a root scriptlet with an agent of its own as the control. |
@@ -101,10 +101,9 @@ Test-only files sit in five places, six with #447: `docker/testpkg/` (three pack
 fixtures on master, six once the PRs land), `docker/git-ssh*`,
 `compose/docker-compose.e2e*.yaml` (four), `scripts/fixtures/` (the frontend
 seed on master; `build-agent/` with #446), Dockerfiles written inline by
-`test-sandbox.sh`, and, with #447, `tests/e2e/topologies/kube/` and
-`tests/fixtures/packages/big/`, already at their final paths. Hostile packages exist three
-times (`hostile-fixture`, `agent-hostile`/`agent-thief`,
-`kube-e2e-ssh`/`kube-e2e-thief`), each with its own idea of what to try.
+`test-sandbox.sh`, and, with #447, `tests/e2e/topologies/kube/`, already at
+its final path. Hostile packages exist twice (`hostile-fixture`,
+`agent-hostile`/`agent-thief`), each with its own idea of what to try.
 
 ## Duplicated and redundant work
 
@@ -117,11 +116,11 @@ times (`hostile-fixture`, `agent-hostile`/`agent-thief`,
 | D5 | #450's "not listed" phase repeats the ceiling's unit tests (`unset_is_every_package`, `empty_lists_no_package`, `membership_is_exact`); its enforcement is the sandbox leg's. | **Drop** the phase; assert the log line in the worker's unit test. | One stack cycle |
 | D6 | #452's "unknown host" phase tests OpenSSH's host-key check once the file is used; `git_ssh_command_uses_the_agent_and_sets_host_policy` and the staging tests show it is used. The "pinned host" phase is the one that catches the readability bug the PR fixes. | **Keep** pinned host, folded into `ssh-credentials` (below). **Drop** unknown host. | One stack cycle |
 | D7 | The remaining SSH phases recreate the whole stack between phases. | **Merge** into one `ssh-credentials` scenario (unauthorised, then authorised with a pinned `known_hosts`), recreating workers only (`e2e-worker-env`), as `e2e-scenarios.md` specifies. | Six fresh stacks become one stack and one worker recreate |
-| D8 | Three hostile fixture sets (`hostile-fixture`, `agent-hostile`+`agent-thief`, `kube-e2e-ssh`+`kube-e2e-thief`) each encode what a hostile build tries. `key-scan.pl` exists only for the build agent. | **Merge** into one fixture set under `tests/fixtures/packages/hostile*` with one list of attempts; every executor's suite runs the same set. Keep the per-executor legs: the key sits in a different place for each. | Fixture drift; the next executor gets the attempts for free |
-| D9 | Kube's dependency-from-repository, cancel and worker-restart legs are meaningful on every topology, and the chroot worker has no e2e for any of them. | **Merge** into shared scenarios (`repo-dependency`, `cancel`, `worker-restart`) run on the reference topology and on `kube`. `worker-restart` requires no capability; its check that the source cache survived is one line conditional on `chroot`. Keep the kube-only legs (policy, quota, stop, stuck pod, 2 GiB relay, user namespaces, open policy) as scenarios requiring kube capabilities. | No time; three scenarios written once instead of per executor |
+| D8 | Two hostile fixture sets (`hostile-fixture`, `agent-hostile`+`agent-thief`) each encode what a hostile build tries. `key-scan.pl` exists only for the build agent. | **Merge** into one fixture set under `tests/fixtures/packages/hostile*` with one list of attempts; every executor's suite runs the same set. Keep the per-executor legs: the key sits in a different place for each. | Fixture drift; the next executor gets the attempts for free |
+| D9 | Kube's dependency-from-repository, cancel and worker-restart legs are meaningful on every topology, and the chroot worker has no e2e for any of them. | **Merge** into shared scenarios (`repo-dependency`, `cancel`, `worker-restart`) run on the reference topology and on `kube`. `worker-restart` requires no capability; its check that the source cache survived is one line conditional on `chroot`. Keep the kube-only legs (policy, stop, stuck pod, 2 GiB relay) as scenarios requiring kube capabilities. | No time; three scenarios written once instead of per executor |
 | D10 | `kernelTests` compiles the four test binaries that `lintAndTestRust` compiles too; the tests run in seconds. | **Merge**: run them in the Rust job from that job's build. `test-kernel.sh` takes the executables from `cargo test --workspace --no-run` there rather than `-p`, whose different feature set would recompile. | ~12 runner-minutes per push; the Rust job grows ~1-2 min (pacman in the container plus the tests) |
 | D11 | Every compiling job starts from an empty `target/`. | **Cache** Cargo output per job ([CI compilation](#ci-compilation)). | Most of each job's compile time on a warm cache (estimate: the Rust job's 17 min to 6-8) |
-| D12 | With #447, the nightly builds the server image twice, in `e2e-nightly.yml` and `e2e-kube.yml`. | **Merge** into one e2e workflow: an image job builds and saves each image once, topology jobs load them. | One server image build per night (estimate 5-8 min of runner time) |
+| D12 | With #447, the nightly builds the server image twice, in `e2eTest` and `e2eKube`. | **Merge** into one e2e workflow: an image job builds and saves each image once, topology jobs load them. | One server image build per night (estimate 5-8 min of runner time) |
 | D13 | `conformance-tests.md` proposes sandbox checks that "mirror `test-sandbox.sh`". | **Keep**, but run the isolation suite's probe against the packaged binary instead of copying its cases. | A second copy avoided |
 | D14 | `fake_worker.rs` and the e2e both see enrollment, claim and complete. | **Keep** both: the fake worker asserts the protocol's safety rails offline, the e2e a real build. Scenarios must not re-assert protocol details. | -- |
 | D15 | #450's `the_agent_socket_is_granted_only_to_a_build_offered_it` builds the ruleset; the sandbox leg proves the kernel enforces it. | **Keep** both: different layers. | -- |
@@ -650,13 +649,13 @@ file is deleted in the step that moves its last user, never earlier.
    scenarios, three of them shared, and the packages the shared ones use
    join `tests/fixtures/packages/`; `gitssh.yaml` becomes the `gitssh`
    fixture's Kustomize component. One e2e workflow with the image job, the
-   `run-e2e` and `run-e2e:<topology>` labels; `e2e-kube.yml`,
+   `run-e2e` and `run-e2e:<topology>` labels; the `e2eKube` job,
    `run-e2e-kube` and the kube `run.sh` go. `AGENTS.md`: the
    `./tests/e2e/topologies/kube/run.sh` lines of the command block (`E2E_BIG`,
    `KEEP`, `REUSE`, `E2E_LEGS`) become their `run.sh --topology kube`
    equivalents; the kube bullet; the CI paragraph's workflows and labels.
    Verifies: every former leg reports pass or skip in the summary; the
-   nightly takes no longer than today's two workflows in parallel.
+   nightly takes no longer than today's two jobs in parallel.
 10. **Hostile fixtures** (D8). One set; `build-isolation` runs it through
     both executors' entry points, `kube` through its pods. Verifies: each leg
     still fails with its executor's confinement disabled.

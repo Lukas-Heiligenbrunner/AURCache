@@ -1,13 +1,13 @@
 name: E2E (nightly)
 
-# The full end-to-end suite builds the server and worker images and exercises
-# them against the real AUR and Arch mirrors. That makes it slow (~15 min) and
-# flaky in ways no diff can fix, so it runs once a night instead of on every
+# The end-to-end suites build the server and worker images and exercise them
+# against the real AUR and Arch mirrors. That makes them slow (15-30 min) and
+# flaky in ways no diff can fix, so they run once a night instead of on every
 # push -- and only when something actually landed since the last slot.
 #
-# To run it on a pull request on demand, add the `run-e2e` label; a job of its
-# own takes it off once the run is over, pass or fail, so re-adding it re-runs
-# the suite.
+# To run a suite on a pull request on demand, add the `run-e2e` label, or
+# `run-e2e-kube` for the Kubernetes worker's suite; a job of its own takes the
+# label off once the run is over, pass or fail, so re-adding it re-runs the suite.
 on:
   schedule:
     - cron: '17 3 * * *'
@@ -60,13 +60,101 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         run: ./scripts/test-e2e.sh hello
 
+  # The Kubernetes worker in a throwaway kind cluster
+  # (tests/e2e/topologies/kube/run.sh).
+  e2eKube:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'run-e2e-kube'
+    runs-on: ubuntu-latest
+    # A run takes about twenty minutes. The run step has a shorter limit of its
+    # own: a step that times out fails, so its logs are kept, whereas a job
+    # that times out is cancelled and keeps none.
+    timeout-minutes: 90
+    env:
+      KIND_VERSION: v0.33.0
+      # kind-linux-amd64 of that release, as its .sha256sum file gives it.
+      KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+      # kubectl at the Kubernetes version of the suite's node image (linux/amd64).
+      KUBECTL_VERSION: v1.37.0
+      KUBECTL_SHA256: 6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Check for new commits
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] \
+            && [ "$(git log -1 --format=%ct)" -lt "$(($(date +%s) - 90000))" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No commits in the last 25h; skipping."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The cluster holds the builder image and a 2 GiB package twice over;
+      # removing preinstalled toolchains that this job doesn't use makes room
+      # for them.
+      - name: Free disk space
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install kind and kubectl
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          dir="$RUNNER_TEMP/bin"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/kind" \
+            "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64"
+          curl -fsSL -o "$dir/kubectl" "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl"
+          printf '%s  %s\n' "$KIND_SHA256" "$dir/kind" "$KUBECTL_SHA256" "$dir/kubectl" \
+            | sha256sum --check --strict
+          chmod +x "$dir/kind" "$dir/kubectl"
+          echo "KIND=$dir/kind" >> "$GITHUB_ENV"
+          echo "KUBECTL=$dir/kubectl" >> "$GITHUB_ENV"
+
+      - name: Set up Docker
+        if: steps.changed.outputs.run == 'true'
+        uses: docker/setup-docker-action@v5
+
+      - name: Set up Docker Buildx
+        if: steps.changed.outputs.run == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Update local toolchain
+        if: steps.changed.outputs.run == 'true'
+        run: rustup update
+
+      - name: Run the Kubernetes E2E test
+        if: steps.changed.outputs.run == 'true'
+        timeout-minutes: 75
+        env:
+          AURCACHE_TEST_PREFIX: ci
+          CLEANUP: '1'
+          E2E_SCRATCH: ${{ runner.temp }}/kube-e2e
+          TMPDIR: ${{ runner.temp }}
+        run: ./tests/e2e/topologies/kube/run.sh hello
+
+      - name: Keep the logs
+        if: failure() && steps.changed.outputs.run == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: kube-e2e-logs
+          path: ${{ runner.temp }}/aurcache-e2e-*.log
+
   # Take the label off after the run, pass or fail, so that adding it again
   # re-runs the suite. A job of its own, so the token that can edit the PR
   # never shares a job with the tree's code. Fork PRs get a read-only token,
   # so there the label stays.
   removeLabel:
-    needs: e2eTest
-    if: always() && github.event_name == 'pull_request' && github.event.label.name == 'run-e2e'
+    needs: [e2eTest, e2eKube]
+    if: >-
+      always() && github.event_name == 'pull_request'
+      && (github.event.label.name == 'run-e2e' || github.event.label.name == 'run-e2e-kube')
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -76,5 +164,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          LABEL: ${{ github.event.label.name }}
         # The REST call needs only the pull-requests permission above.
-        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/run-e2e"
+        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/$LABEL"
