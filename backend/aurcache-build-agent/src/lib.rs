@@ -17,6 +17,7 @@
 //!
 //! See `design/in-progress/container-workers.md`.
 
+pub mod handin;
 pub mod layout;
 pub mod makepkg_conf;
 pub mod report;
