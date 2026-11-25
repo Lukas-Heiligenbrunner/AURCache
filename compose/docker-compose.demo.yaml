@@ -88,7 +88,7 @@ services:
     # moves to a newer Debian from time to time, and a newer C library sorts
     # text differently under indexes already built. Same pin the CLI's
     # generated compose files use.
-    image: postgres:18-trixie
+    image: postgres:19-trixie
     user: "999:999"
     environment:
       - POSTGRES_USER=aurcache
