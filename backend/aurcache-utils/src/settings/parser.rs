@@ -3,8 +3,8 @@ use std::str::FromStr;
 pub trait ParseSetting: Sized + Clone {
     fn parse_setting(s: &str) -> Result<Self, String>;
 }
-/// A span of time written as a duration (`1h`, `90m`, `1h30m`, or plain
-/// seconds), held as seconds.
+/// A span of time above zero, written as a duration (`1h`, `90m`, `1h30m`, or
+/// plain seconds) and held as seconds.
 ///
 /// Its own type for the reason [`ByteSize`] is: a plain number parse would
 /// read `1h` as garbage and quietly fall back to the default.
@@ -13,13 +13,13 @@ pub struct Seconds(pub u64);
 
 impl ParseSetting for Seconds {
     fn parse_setting(s: &str) -> Result<Self, String> {
-        aurcache_common::units::parse_duration(s)
+        aurcache_common::settings::parse_positive_duration(s)
             .map(Seconds)
-            .ok_or_else(|| format!("expected a duration such as 1h or 90m, got {s:?}"))
+            .ok_or_else(|| format!("expected a duration above zero such as 1h, got {s:?}"))
     }
 }
 
-/// A byte count written as a size (`20G`, `512M`, `1024`).
+/// A byte count above zero, written as a size (`20G`, `512M`, `1024`).
 ///
 /// Its own type rather than `u64`, whose plain number parse would read `20G`
 /// as garbage and quietly fall back to the default.
@@ -28,9 +28,9 @@ pub struct ByteSize(pub u64);
 
 impl ParseSetting for ByteSize {
     fn parse_setting(s: &str) -> Result<Self, String> {
-        aurcache_common::units::parse_size(s)
+        aurcache_common::settings::parse_positive_size(s)
             .map(ByteSize)
-            .ok_or_else(|| format!("expected a size such as 20G, got {s:?}"))
+            .ok_or_else(|| format!("expected a size above zero such as 20G, got {s:?}"))
     }
 }
 
@@ -80,7 +80,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ParseSetting, Seconds, SshKeyName};
+    use super::{ByteSize, ParseSetting, Seconds, SshKeyName};
     use aurcache_common::settings::Setting;
 
     /// A duration setting reads what the worker's do: units, or plain seconds
@@ -91,6 +91,15 @@ mod tests {
         assert_eq!(Seconds::parse_setting("90m"), Ok(Seconds(5400)));
         assert_eq!(Seconds::parse_setting("3600"), Ok(Seconds(3600)));
         assert!(Seconds::parse_setting("an hour").is_err());
+        assert!(Seconds::parse_setting("0").is_err());
+    }
+
+    /// Zero is refused as the API refuses it, so `MAX_ARTIFACT_SIZE=0` reads
+    /// as the default.
+    #[test]
+    fn sizes_take_units_but_not_zero() {
+        assert_eq!(ByteSize::parse_setting("1024"), Ok(ByteSize(1024)));
+        assert!(ByteSize::parse_setting("0").is_err());
     }
 
     /// Settings can come from environment variables, where `1` and `yes` are
