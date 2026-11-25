@@ -38,14 +38,14 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 
 | Variable               | Type          | Description                                                           | Default |
 |------------------------|---------------|-----------------------------------------------------------------------|---------|
-| VERSION_CHECK_INTERVAL | Duration      | How often to check package versions (`1h`, `30m`, or seconds)         | `1h`    |
+| VERSION_CHECK_INTERVAL | Duration      | How often to check package versions (`1h`, `30m`, or seconds; `0` reads as the default) | `1h`    |
 | AUTO_UPDATE_SCHEDULE   | String (crontab) | When to rebuild out-of-date packages, as a [schedule](#schedules) (`@never` to disable) | `@daily` |
 | BUILD_ON_NEW_VERSION   | Boolean       | Queue a rebuild as soon as a version check finds a package out of date, rather than waiting for the auto-update schedule | `true`  |
 | TZ                     | String        | Timezone cron schedules (`AUTO_UPDATE_SCHEDULE`, `MIRROR_RANK_SCHEDULE`) are read in, e.g. `Europe/Paris`. The compose files forward the host's `/etc/localtime` and pass `TZ` through when it is set where compose runs | the host's, else UTC |
 | LOG_LEVEL              | String        | Log level                                                             | INFO    |
 | LOG_STYLE              | String        | `never` turns off coloured log output, for a log collector that shows the escape codes; anything else keeps it | coloured |
-| JOB_TIMEOUT            | Duration      | Longest a build may run (`3h`, seconds). Sent with each job: the worker stops the build at this or its own `WORKER_BUILD_TIMEOUT`, whichever is shorter. Also a setting, which a package can set for itself | `1h`    |
-| MAX_ARTIFACT_SIZE      | Size          | Largest package file a worker or a user may upload, e.g. `20G` (a larger user upload is refused with a 413); also a setting, per package or global | `20G` |
+| JOB_TIMEOUT            | Duration      | Longest a build may run (`3h`, seconds; `0` reads as the default). Sent with each job: the worker stops the build at this or its own `WORKER_BUILD_TIMEOUT`, whichever is shorter. Also a setting, which a package can set for itself | `1h`    |
+| MAX_ARTIFACT_SIZE      | Size          | Largest package file a worker or a user may upload, e.g. `20G` (`0` reads as the default; a larger user upload is refused with a 413); also a setting, per package or global | `20G` |
 | PERSISTENT_BUILDDIR    | Boolean       | Keep a package's build tree between its builds, for one whose tree holds expensive state (a `prepare()` that clones or downloads into `$srcdir`, a very long compile). The tree is kept as is between successful builds: archives are extracted over it, which never deletes, and untracked files survive a VCS update. Turning it off leaves the trees the package kept, one per worker and architecture, unused until each worker's reclaim takes them, oldest first; also a setting, per package or global | `false` |
 | DATE_FORMAT            | String        | How the web UI writes dates: field order, zero padding and clock, e.g. `dmy-nopad-12`; also a setting, which a browser can override for itself | `ymd-pad-24` |
 | RETIRED_PACKAGE_GRACE  | Duration      | How long a package file stays downloadable after a newer build or a removal takes it out of the repository database (`1d`, `12h`, or seconds), so clients that synced just before can still fetch it | `1d` |

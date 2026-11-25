@@ -305,22 +305,16 @@ impl Setting {
             Self::BuildOnNewVersion | Self::PersistentBuilddir | Self::ParseNetwork => {
                 parse_boolean(value).map(|_| ())
             }
-            Self::MaxArtifactSize => crate::units::parse_size(value)
-                .filter(|&bytes| bytes > 0)
-                .map(|_| ())
-                .ok_or_else(|| {
-                    format!("{value:?} is not a size (expected e.g. 20G, 512M or a byte count)")
-                }),
-            // Zero is refused rather than stored: a check every zero seconds
-            // spins, and a zero timeout reclaims every build as it starts.
-            Self::VersionCheckInterval | Self::JobTimeout => crate::units::parse_duration(value)
-                .filter(|&seconds| seconds > 0)
-                .map(|_| ())
-                .ok_or_else(|| {
+            Self::MaxArtifactSize => parse_positive_size(value).map(|_| ()).ok_or_else(|| {
+                format!("{value:?} is not a size (expected e.g. 20G, 512M or a byte count)")
+            }),
+            Self::VersionCheckInterval | Self::JobTimeout => {
+                parse_positive_duration(value).map(|_| ()).ok_or_else(|| {
                     format!(
                         "{value:?} is not a duration (expected e.g. 1h, 90m or a number of seconds)"
                     )
-                }),
+                })
+            }
             // Empty or `@never` is "off". The seed only moves `H` around,
             // never makes a schedule valid or not, so any will do here.
             Self::AutoUpdateSchedule if crate::schedule::is_off(value) => Ok(()),
@@ -333,6 +327,21 @@ impl Setting {
             Self::DateFormat | Self::MakepkgConf | Self::PacmanConf => Ok(()),
         }
     }
+}
+
+/// A duration setting's value, in seconds. Zero is refused: the worker reads a
+/// zero timeout as none, but the lease reaper takes the build back once its
+/// grace runs out, and a zero interval spins.
+#[must_use]
+pub fn parse_positive_duration(value: &str) -> Option<u64> {
+    crate::units::parse_duration(value).filter(|&seconds| seconds > 0)
+}
+
+/// A size setting's value, in bytes. Zero is refused: it would refuse every
+/// upload.
+#[must_use]
+pub fn parse_positive_size(value: &str) -> Option<u64> {
+    crate::units::parse_size(value).filter(|&bytes| bytes > 0)
 }
 
 /// Parse a boolean setting, including the spellings used in environment variables.
@@ -399,7 +408,8 @@ mod tests {
     }
 
     /// A duration is checked before it is stored, and zero is refused: it
-    /// would spin the version check, or reclaim every build as it starts.
+    /// would spin the version check, or have the lease reaper take back every
+    /// build once its grace runs out.
     #[test]
     fn duration_settings_are_validated() {
         for setting in [Setting::VersionCheckInterval, Setting::JobTimeout] {
