@@ -42,19 +42,19 @@ jiff = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-clap = { version = "4.6.7", features = ["derive", "env"] }
-clap_complete = "4.6"
+clap = { version = "4.6.10", features = ["derive", "env"] }
+clap_complete = "4.6.12"
 # Without the default `editor` prompt, which the CLI does not use and which
 # brings tempfile along.
 dialoguer = { version = "0.12.0", default-features = false, features = ["password"] }
 dirs = "7.0"
-getrandom = "0.4"
-unicode-width = "0.2"
+getrandom = "0.4.3"
+unicode-width = "0.2.3"
 
 [dev-dependencies]
-wiremock = "0.6"
+wiremock = "0.6.5"
 tempfile.workspace = true
 # Only `YamlLoader` on UTF-8 text: the default `encoding` feature pins
 # encoding_rs to one exact release, holding back the copy reqwest and multer
 # share.
-yaml-rust2 = { version = "0.13.1", default-features = false }
+yaml-rust2 = { version = "0.13.2", default-features = false }
