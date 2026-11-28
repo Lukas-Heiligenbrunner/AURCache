@@ -19,10 +19,10 @@ workspace = true
 tokio = { workspace = true, features = ["full"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-futures = "0.3"
-bytes = "1.12.1"
+futures = "0.3.34"
+bytes = "1.12.2"
 tokio-util = { version = "0.7.20", features = ["io"] }
-bollard = "0.21"
+bollard = "0.21.1"
 aurcache-common = { path = "../aurcache-common", features = ["beneath"] }
 aurcache-worker-core = { path = "../aurcache-worker-core" }
 aurcache-worker-container = { path = "../aurcache-worker-container" }

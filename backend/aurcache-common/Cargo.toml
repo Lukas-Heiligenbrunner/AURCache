@@ -20,15 +20,15 @@ utoipa = { workspace = true, optional = true }
 sea-orm = { workspace = true, optional = true }
 # Only for working out when a schedule runs (`clock`). Default features off:
 # the server's own jiff brings the time zone database.
-jiff = { version = "1.0.0", default-features = false, features = ["std"], optional = true }
-sha2 = { version = "0.11", optional = true }
-hex = { version = "0.4", optional = true }
-rustix = { version = "1.1", features = ["fs"], optional = true }
+jiff = { version = "1.0.3", default-features = false, features = ["std"], optional = true }
+sha2 = { version = "0.11.2", optional = true }
+hex = { version = "0.4.3", optional = true }
+rustix = { version = "1.1.6", features = ["fs"], optional = true }
 
 [dev-dependencies]
-jiff = "1.0.0"
+jiff = "1.0.3"
 tempfile = { workspace = true }
-libc = "0.2"
+libc = "0.2.191"
 
 [features]
 # Plain serde types that a browser frontend can use, with the database derives

@@ -18,16 +18,16 @@ jiff = {workspace = true}
 
 aurcache-deps = {path = "../aurcache-deps"}
 
-rocket = { version = "0.5.1", features = ["mtls", "json"] }
-rocket_oauth2 = "0.5.0"
+rocket = { version = "0.5.4", features = ["mtls", "json"] }
+rocket_oauth2 = "0.5.1"
 utoipa = { workspace = true }
 utoipa-redoc = { version = "7.0.0", features = ["rocket"] }
 utoipa-scalar = { version = "0.4.0", features = ["rocket"] }
-rust-embed = { version = "8.13.0", optional = true }
+rust-embed = { version = "8.14.0", optional = true }
 reqwest = { workspace = true, features = ["blocking", "gzip", "json"] }
 hex = "0.4.3"
-rand = "0.10"
-rand_core = "0.10"
+rand = "0.10.4"
+rand_core = "0.10.1"
 
 
 aurcache-db = {path = "../aurcache-db"}
@@ -62,4 +62,4 @@ tempfile = { workspace = true }
 # For the package fixtures the upload tests share with aurcache-utils's.
 flate2 = { workspace = true }
 tar = { workspace = true }
-zstd = "0.14"
+zstd = "0.14.5"

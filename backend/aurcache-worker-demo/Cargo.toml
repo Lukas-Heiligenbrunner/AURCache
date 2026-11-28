@@ -20,7 +20,7 @@ workspace = true
 tokio = { workspace = true, features = ["full"] }
 anyhow = { workspace = true }
 tar = { workspace = true }
-zstd = "0.14.2"
+zstd = "0.14.5"
 tempfile = { workspace = true }
 aurcache-common = { path = "../aurcache-common" }
 aurcache-worker-core = { path = "../aurcache-worker-core" }

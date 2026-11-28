@@ -17,7 +17,7 @@ jiff = { workspace = true }
 # messages, and it would be the only C library the server links for OpenPGP.
 pgp = { version = "0.21.1", default-features = false }
 # The random number generator traits pgp's API takes are rand 0.8's.
-rand = "0.8.6"
+rand = "0.10.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
